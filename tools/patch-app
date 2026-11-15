@@ -1,33 +1,35 @@
 #!/usr/bin/env bash
-# Apply this checkout's own engine patches to the engine of an installed NX2Apple.app, and sign the app again.
-#   tools/patch-app                    apply the patches listed in patches/local
-#   tools/patch-app --patches 0056 0057 0058   apply these patches instead (their numbers in patches/series)
+# Apply this fork's own engine patches to the engine of an installed NX2Apple.app, and sign the app again.
+#   tools/patch-app                    apply the patches listed in the branch's patches/local
+#   tools/patch-app --patches 0056 0057 0058   apply these patches instead
 #   tools/patch-app --restore          put the app's own engine back
+#   tools/patch-app --from BRANCH      where the patches live (default: local)
 #   tools/patch-app --app PATH         the installed app (default: /Applications/NX2Apple.app)
-#   tools/patch-app --series FILE      another series (default: patches/series)
 #
-# patches/local lists the personal branch's patches, one name per line; without it, the series' fork-only ones.
-# The app carries its engine as Contents/Resources/engine, the source tree a build reads. Every patch is dry-run first:
-# one that does not fit the app's engine stops the run before anything changes, and names the patch. The app's own engine
-# is kept in ~/Library/Application Support/nx2-wide-engine/engine-backup the first time, for --restore.
+# The patches are read from BRANCH (git objects), not from the checkout, so the branch you are on does not matter:
+# switch to main to work, and run this from there. patches/local in that branch is the list, one name per line; a
+# patch added there is applied by the next run. Without such a branch the checkout's patches/local is used, then the
+# series' fork-only patches. Every patch is dry-run first: one that does not fit the app's engine stops the run before
+# anything changes. The app's own engine is kept in ~/Library/Application Support/nx2-wide-engine/engine-backup.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 APP=${NX2_APP:-/Applications/NX2Apple.app}
+BRANCH=${NX2_LOCAL_BRANCH:-local}
 SERIES=$ROOT/patches/series
 BACKUP="$HOME/Library/Application Support/nx2-wide-engine/engine-backup"
 MODE=install
 WANTED=""
 
-usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 die() { echo "patch-app: $*" >&2; exit 1; }
 note() { echo "patch-app: $*"; }
 
 while [ $# -gt 0 ]; do
     case $1 in
         --restore) MODE=restore; shift ;;
+        --from) BRANCH=${2:?--from needs a branch}; shift 2 ;;
         --app) APP=${2:?--app needs a path}; shift 2 ;;
-        --series) SERIES=${2:?--series needs a path}; shift 2 ;;
         --patches) shift; while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do WANTED="$WANTED $1"; shift; done ;;
         -h|--help) usage 0 ;;
         *) usage 1 ;;
@@ -36,7 +38,6 @@ done
 
 ENGINE="$APP/Contents/Resources/engine"
 [ -d "$ENGINE" ] || die "no engine at $ENGINE (--app PATH)"
-[ -f "$SERIES" ] || die "no series at $SERIES (--series FILE)"
 if pgrep -x NSPortBuilder >/dev/null; then die "quit NX2Apple first: it is running"; fi
 
 sign() {
@@ -53,28 +54,52 @@ if [ "$MODE" = restore ]; then
     exit 0
 fi
 
-# The patches to apply: the ones named on the command line, else the series' fork-only entries.
-LIST=$(mktemp "${TMPDIR:-/tmp}/patch-app.XXXXXX")
-trap '/bin/rm -f "$LIST"' EXIT
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/patch-app.XXXXXX")
+LIST=$WORK/list
+trap '/bin/rm -rf "$WORK"' EXIT
+
+series_text() { git -C "$ROOT" show "$BRANCH:patches/series" 2>/dev/null || cat "$SERIES"; }
+local_text() { git -C "$ROOT" show "$BRANCH:patches/local" 2>/dev/null || cat "$ROOT/patches/local" 2>/dev/null || true; }
+
+# A patch as the branch has it; the checkout's copy when the branch does not have the file.
+add_patch() {
+    if git -C "$ROOT" show "$BRANCH:patches/$1" > "$WORK/$1" 2>/dev/null; then
+        echo "$WORK/$1" >> "$LIST"
+    elif [ -f "$ROOT/patches/$1" ]; then
+        echo "$ROOT/patches/$1" >> "$LIST"
+    else
+        die "no patch $1 in $BRANCH, and none in this checkout"
+    fi
+}
+
 if [ -n "$WANTED" ]; then
     for n in $WANTED; do
-        f=$(awk -v n="$n" 'index($0, n "-") == 1 { print; exit }' "$SERIES")
-        [ -n "$f" ] || die "no patch $n in $SERIES"
-        echo "$ROOT/patches/$f" >> "$LIST"
+        name=$(series_text | awk -v n="$n" 'index($0, n "-") == 1 { print; exit }')
+        [ -n "$name" ] || die "no patch $n in the series of $BRANCH"
+        add_patch "$name"
     done
-elif [ -f "$ROOT/patches/local" ]; then
-    # The personal branch's list: the patches this fork needs and upstream does not (forwarded ones included).
-    while IFS= read -r name; do
-        case $name in ''|'#'*) continue ;; esac
-        f="$ROOT/patches/$name"
-        [ -f "$f" ] || die "patches/local names $name, which is not in patches/"
-        echo "$f" >> "$LIST"
-    done < "$ROOT/patches/local"
 else
-    die "no patches/local in this checkout: switch to the local branch, or name the patches with --patches"
+    : > "$LIST"
+    names=$(local_text)
+    if [ -z "$names" ]; then
+        series_text > "$WORK/series"
+        : > "$WORK/fork-only"
+        while IFS= read -r name; do
+            case $name in ''|'#'*) continue ;; esac
+            if git -C "$ROOT" show "$BRANCH:patches/$name" 2>/dev/null | grep -q '^Upstream-Status: *fork-only'; then
+                echo "$name" >> "$WORK/fork-only"
+            fi
+        done < "$WORK/series"
+        names=$(cat "$WORK/fork-only")
+        [ -n "$names" ] || die "no patches/local in $BRANCH: name the patches with --patches"
+    fi
+    for name in $names; do
+        case $name in ''|'#'*) continue ;; esac
+        add_patch "$name"
+    done
+    [ -s "$LIST" ] || die "patches/local in $BRANCH lists no patch"
 fi
 count=$(wc -l < "$LIST" | tr -d ' ')
-[ "$count" -gt 0 ] || die "no fork-only patches in $SERIES: name the ones to apply with --patches"
 
 # Dry-run every patch on the app's engine: the first that does not fit stops the run, nothing changed yet.
 while IFS= read -r f; do
@@ -82,7 +107,7 @@ while IFS= read -r f; do
         die "$(basename "$f") does not fit the app's engine: the app is on another upstream pin; build the engine with tools/engine.py tree instead"
     fi
 done < "$LIST"
-note "$count patches fit the app's engine"
+note "$count patches from $BRANCH fit the app's engine"
 
 OLD=$(cat "$ENGINE/.engine-id" 2>/dev/null || true)
 mkdir -p "$(dirname "$BACKUP")"

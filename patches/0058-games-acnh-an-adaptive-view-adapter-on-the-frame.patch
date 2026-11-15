@@ -1,0 +1,2914 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Sun, 15 Nov 2026 00:14:23 +0800
+Subject: [PATCH] games/acnh: an adaptive-view adapter on the frame step state
+ page
+
+On a picture taller than 16:9 the game reuses projections and screen rectangles
+it cached before the shape changed, so scissors, captures, field ranges and the
+inline keyboard keep their 16:9 positions. The screen-shape stubs change the
+output size and camera angle but cannot invalidate those cached objects.
+
+Register an owned ARM64 adapter (view.s, assembled by gen_view_stubs.py,
+MIT-0) from the profile's FRAME_STEP callback, for the 3.0.3 main build only:
+21 hooks and 29 cache checks refresh cached projections, follow the current
+perspective in scissors and captures, widen field ranges and near-plane
+unprojection, and dock the inline keyboard and footer. It shares dm_fps_state
+with screen_shape (+0x58 target aspect, +0xa0..+0xb8 frame stamps), so no VIEW
+table, VIEW_STATE_OFF, host file or general-code change is needed.
+
+main+0x265140 is the one shared site: a single chained stub runs the upstream
+y-row division first (its 16:9 test reads m0/m5, which the adapter's
+Lscreen_projection rewrites) then calls the adapter's keyboard dock. The stub
+saves x30 with x0: the bl overwrites x30 with its own return address, and a
+stub that saved only x0 returned to the instruction after that bl and walked
+the stack up a page per pass. main+0x27d4c0 and main+0x27d570 were
+disassembled and coexist.
+
+The frame stamps are values in the free part of the state page, with no host
+pointer: +0xa8 is the host's present counter, +0xb0 the keyboard frame's stamp
+and +0xb8 a touch panel's. dm_guest_frame_tick advances +0xa8 each present.
+Lrecent_keyboard reads +0xb0, so the dock never ran while the stamps went to
++0x28 / +0x38, and _dm_view_keyboard_window dereferenced the counter as a
+pointer.
+
+The stubs' branches name a label and are encoded from the stub's own layout
+(nso_asm CBZ / TBZ / BCOND) instead of a hand-counted word offset: the 0x265140
+stub grew by three instructions, and a stale +41 would have branched into the
+ldp before the ret, popping 16 bytes the stub never pushed. test_view_stubs
+checks that every conditional branch of every stub the profile emits lands
+inside that stub, and that duo_anchor.c's __text is still the words pasted
+into patches.py.
+
+Checked: the rewritten 3.0.3 main from its original NSO is byte-identical to
+the image validated on the device, as are fixups.tsv, sites.tsv and cuts.tsv;
+test_patches, test_view_stubs and test_docs pass (38); both new tests fail when
+their defect is reintroduced. Not checked: a device run of the dock offset's
+stretch division (option B) and of the pointer-free keyboard frame stamps.
+
+(cherry picked from commit 5c91e2a2e608a4ceb3d3aa512e75511391161e25)
+
+Upstream-Status: forwarded seedds/nxnative#2609
+Reason: A wider-than-16:9 iPhone picture keeps its own shape, its touches land on the control they touch, and Animal Crossing: New Horizons refreshes the projections it cached at 16:9
+Issue: none
+
+---
+ dm/games/01006F8002326000/README.md         |   13 +
+ dm/games/01006F8002326000/gen_view_stubs.py |   63 +
+ dm/games/01006F8002326000/patches.py        |  649 ++++++--
+ dm/games/01006F8002326000/view.LICENSE      |    5 +
+ dm/games/01006F8002326000/view.s            | 1657 +++++++++++++++++++
+ dm/host/hle_os.c                            |    7 +-
+ dm/tools/nso_asm.py                         |    9 +
+ dm/tools/tests/test_view_stubs.py           |  233 +++
+ docs/reference/rewriter.md                  |   16 +
+ 9 files changed, 2541 insertions(+), 111 deletions(-)
+ create mode 100644 dm/games/01006F8002326000/gen_view_stubs.py
+ create mode 100644 dm/games/01006F8002326000/view.LICENSE
+ create mode 100644 dm/games/01006F8002326000/view.s
+ create mode 100644 dm/tools/tests/test_view_stubs.py
+
+diff --git a/dm/games/01006F8002326000/README.md b/dm/games/01006F8002326000/README.md
+index 08735cb1..bebf344b 100644
+--- a/dm/games/01006F8002326000/README.md
++++ b/dm/games/01006F8002326000/README.md
+@@ -63,6 +63,18 @@ Checked on a Mac (M1, macOS 27, headless, an island save) against 16:9: the 3D v
+ 
+ - From a fresh save, `DM_KEYS="40:A*51/2,145:B*12/0.4,151:Down,152:Right*4/0.4,154.5:A,155.5:Right*4/0.4,158:A,159:Down*2/0.4,160.5:Left*2/0.4,162:A,163.5:Plus,167:A*4/2,175:Plus,178:A*146/2,179:Plus*30/4"` names the player "tom" on the keyboard, takes the defaults, watches the movie and reaches the dock at about frame 14,100 (470 s).
+ 
++## Adaptive view consistency (current)
++
++On a taller picture the game caches projections and screen rectangles that a change of shape has to invalidate. The adapter in `view.s` (built to position-independent ARM64 by `gen_view_stubs.py`, licensed MIT-0 in `view.LICENSE`) is registered by `FRAME_STEP` for 3.0.3 `main` only: 21 hooks and 29 caches refresh cached projections, follow the current perspective in scissors and captures, widen field ranges and near-plane unprojection, and dock the inline keyboard and footer. It shares the frame step state page with `screen_shape` and needs no host state of its own.
++
++`main+0x265140` is the single `ret` of `nn::ui2d::DrawInfo::SetProjectionMtx`. One chained stub runs the upstream y-row division first (its 16:9 test reads m0 and m5, which the adapter's `Lscreen_projection` rewrites), then calls the adapter's keyboard dock; the adapter adds its offset to index 6 instead of overwriting it. `main+0x27d4c0` forces the footer subtree dirty at `Pane::Calculate` entry and `main+0x27d570` runs `duo_calc` after `CalculateGlobalMatrix`: the two were disassembled and coexist.
++
++The adapter follows the host's `DM_SCREEN_ASPECT` (1.3 to 1.77) through `dm_fps_state +0x58`; it does not support arbitrary ratios or folding-display rotation. At `+0x58 = 0` (16:9, or `auto` on iOS) every adapter stub runs the original instructions.
++
++The frame stamps are values in the free part of the state page, with no host pointer: `+0xa8` is the host's present counter (`dm_guest_frame_tick`, `hle_os.c`, one relaxed store each present), `+0xb0` the keyboard frame's stamp and `+0xb8` a touch panel's, written by `keyboard_frame` and `touch_page` through `Ltouch_stamp` (`x17` = 8 and 16). `Lrecent_keyboard` subtracts the first two, so "the inline keyboard rendered in the last two presents" needs no host state. `keyboard_window` keeps its own stamp at `+0x38`, which nothing reads: AnimalDuo's touch-context (bit 3) was not ported.
++
++Open: the dock offset is divided by the vertical stretch before it is added (option B); option A drops that division. Neither has been checked on a device; keyboard docking needs a device check.
++
+ ## Found on this game
+ 
+ - [The Mac host build starts an older Python than the pipeline](../../../docs/reference/packing.md#the-mac-host-build-starts-an-older-python-than-the-pipeline): NX2Apple issue #711 reported the host shader generator starting Python 3.6 despite the bundled Python 3.13 driver. Reproduced with synthetic tools, no gameplay check.
+@@ -78,6 +90,7 @@ General host changes first needed here; each applies to every game:
+ - [The alpha test through a library of its own](../../../docs/reference/rendering.md#the-alpha-test-through-a-library-of-its-own): the island map's corruption (issue #73) improved with an alpha test in a downstream runtime (PR #430).
+ - **One touch sample per game frame** (`touch_read` in `hle_hid.c`): the name-entry keyboard highlighted tapped letters but entered none, since its reader and the input manager read the touch screen in the same frame and the first used up the Start and End (issue #2567): [One touch sample per game frame](../../../docs/reference/services.md#one-touch-sample-per-game-frame).
+ - **The game's view in the shape the game presents** (`front_picture_shape`; with `DM_SCREEN_ASPECT=1.43` the 1920x1344 picture was fitted into a 16:9 view on the phone): [The picture laid out in the shape the game presents](../../../docs/reference/rendering.md#the-picture-laid-out-in-the-shape-the-game-presents).
++- **A hand-emitted stub that calls saves `x30` with its argument** (the `0x265140` chain, which froze the first frame with `pc == lr` and `sp` walking up the stack): [A hand-emitted stub that calls must save x30, not only its argument registers](../../../docs/reference/rewriter.md#a-hand-emitted-stub-that-calls-must-save-x30-not-only-its-argument-registers).
+ 
+ ## Open
+ 
+diff --git a/dm/games/01006F8002326000/gen_view_stubs.py b/dm/games/01006F8002326000/gen_view_stubs.py
+new file mode 100644
+index 00000000..0f7f63e2
+--- /dev/null
++++ b/dm/games/01006F8002326000/gen_view_stubs.py
+@@ -0,0 +1,63 @@
++"""Assemble an owned ARM64 adapter and retain its symbolic relocations.
++
++Usage: gen_view_stubs.py source.s generated.py. Requires Apple's clang only
++when changing the assembly; normal NSO rewriting consumes the generated data.
++"""
++import argparse
++import hashlib
++from pathlib import Path
++import struct
++import subprocess
++import tempfile
++
++
++def assemble(source):
++    with tempfile.TemporaryDirectory() as folder:
++        out=Path(folder)/'stubs.o'
++        subprocess.run(['clang','-arch','arm64','-c',str(source),'-o',str(out)],check=True)
++        blob=out.read_bytes()
++    assert struct.unpack_from('<I',blob)[0]==0xfeedfacf
++    cursor=32;section=None;symbols=None
++    for _ in range(struct.unpack_from('<I',blob,16)[0]):
++        cmd,size=struct.unpack_from('<II',blob,cursor)
++        if cmd==0x19:
++            for j in range(struct.unpack_from('<I',blob,cursor+64)[0]):
++                at=cursor+72+80*j
++                if blob[at:at+16].rstrip(b'\0')==b'__text':
++                    section=(struct.unpack_from('<Q',blob,at+40)[0],*struct.unpack_from('<IIII',blob,at+48))
++        if cmd==2:symbols=struct.unpack_from('<IIII',blob,cursor+8)
++        cursor+=size
++    assert section and symbols
++    length,offset,align,reloff,nreloc=section
++    symoff,count,stroff,strsize=symbols;strings=blob[stroff:stroff+strsize];entries=[]
++    for j in range(count):
++        name,kind,sect,desc,value=struct.unpack_from('<IBBHQ',blob,symoff+16*j)
++        entries.append((strings[name:strings.index(b'\0',name)].decode(),kind,sect,value))
++    names={name:value for name,kind,sect,value in entries if kind&0xe==0xe and sect==1 and kind&1}
++    relocs=[]
++    for j in range(nreloc):
++        address,info=struct.unpack_from('<II',blob,reloff+8*j)
++        symbol=info&0xffffff;pcrel=(info>>24)&1;scale=(info>>25)&3;external=(info>>27)&1;kind=info>>28
++        assert external and scale==2 and kind in (2,3,4), (address,hex(info))
++        assert pcrel==(kind in (2,3))
++        relocs.append((address,kind,entries[symbol][0]))
++    code=blob[offset:offset+length];assert len(code)%4==0
++    return list(struct.unpack('<'+'I'*(len(code)//4),code)),names,sorted(relocs)
++
++
++def generate(source):
++    words,symbols,relocs=assemble(source)
++    lines=['# Generated from '+source.name+' by dm/games/01006F8002326000/gen_view_stubs.py; do not edit.',
++           'source_sha256 = '+repr(hashlib.sha256(source.read_bytes()).hexdigest()),'words = [']
++    lines += ['    '+', '.join(f'0x{v:08x}' for v in words[i:i+6])+',' for i in range(0,len(words),6)]
++    lines += [']','symbols = '+repr(dict(sorted(symbols.items()))),'relocations = '+repr(relocs),'']
++    return '\n'.join(lines)
++
++
++if __name__=='__main__':
++    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('source',type=Path);parser.add_argument('output',type=Path);args=parser.parse_args()
++    generated=generate(args.source)
++    if args.output.exists() and '# BEGIN GENERATED VIEW CODE' in args.output.read_text():
++        old=args.output.read_text();start=old.index('# BEGIN GENERATED VIEW CODE');end=old.index('# END GENERATED VIEW CODE',start)
++        args.output.write_text(old[:start]+'# BEGIN GENERATED VIEW CODE\n'+generated+old[end:])
++    else:args.output.write_text(generated)
+diff --git a/dm/games/01006F8002326000/patches.py b/dm/games/01006F8002326000/patches.py
+index a4892787..ca72111e 100644
+--- a/dm/games/01006F8002326000/patches.py
++++ b/dm/games/01006F8002326000/patches.py
+@@ -1,8 +1,10 @@
+ # Animal Crossing: New Horizons (01006F8002326000): the rewriter's patches of this game's own builds. dm/tools/patch_nso.py loads every profile's patches.py and applies those of a module's NSO build
+ # ID (FRAME_STEP as described there, "Registered patches"). The game has no frame step stubs: FRAME_STEP only gives its main the state page that the screen shape stubs read
+ # (DM_SCREEN_ASPECT, as for Breath of the Wild); with DM_SCREEN_ASPECT unset the page stays zero and every stub runs the original instructions.
++import hashlib
+ import struct
+-from nso_asm import ADRP, B
++from pathlib import Path
++from nso_asm import ADRP, B, BL, BCOND, CBZ, LDP_POST, STP_PRE, STRX, TBZ
+ 
+ # Screen shape (DM_SCREEN_ASPECT, loader.c): a screen taller than 16:9 keeps the picture's width (1920) and takes the height of the screen's ratio (state +0x48, 1344 at 1.43), the
+ # layout space 1280 x 2/3 of it (+0x4c, 896; +0x50 the same as a float). The game's platform config (vtable main+0x47fa0e0, no RTTI) hands its sizes out three ways:
+@@ -11,51 +13,396 @@ from nso_asm import ADRP, B
+ #   main+0x5cdce0 (slot 7) a static display size main+0x4b87524 (the same choice), main+0x5cdd88 (slot 8) a static 1280.0 x 720.0 (main+0x4b87538)
+ #   main+0x5cdcb8 (slot 3) another arg's +0x14: 1920x1080
+ # Each stub is one bit of the conversion site mask (+0x54, DM_SCREEN_ASPECT_SITES, all on by default); a height of 0 (16:9) leaves the original value. x16 / x17 are free at every site
++# ==== BEGIN GENERATED VIEW CODE (gen_view_stubs.py; do not edit) ====
++# Generated from view.s by dm/games/01006F8002326000/gen_view_stubs.py; do not edit.
++source_sha256 = '621da9054f3c960decfb8f803d7632179f66f446d51ad711db976b34082adb91'
++words = [
++    0x2d558801, 0x9000000f, 0x910001ef, 0xb94059ef, 0x3400016f, 0x1c002386,
++    0x1e262040, 0x54000101, 0x1e2701e7, 0x1e2718c6, 0x1e2e1003, 0x1e2348c6,
++    0x1e260821, 0x1e2040e2, 0x1e2c1003, 0x14000000, 0x39402008, 0x350004a8,
++    0x9000000f, 0x910001ef, 0xb94059ef, 0x3400042f, 0xadbe07e0, 0xad010fe2,
++    0xd53b420f, 0xf81f0fef, 0xf940000f, 0x90000010, 0x91000210, 0xeb1001ff,
++    0x54000281, 0xbd40b000, 0x1c002021, 0x1e212000, 0x54000201, 0x9000000f,
++    0x910001ef, 0xb94059ef, 0x3400004f, 0x1e2701e0, 0xbd400c01, 0xbd402002,
++    0x1e211841, 0x1e20c021, 0x1e203821, 0x1e20c021, 0x1c001ec2, 0x1e220802,
++    0x1e222020, 0x1a9f97e8, 0xf84107ef, 0xd51b420f, 0xad410fe2, 0xacc207e0,
++    0xd65f03c0, 0x91002100, 0xa9bf7be8, 0x94000003, 0xa8c17be8, 0xd65f03c0,
++    0x2a1f03e8, 0x9000000f, 0x910001ef, 0xb94059f0, 0x34000690, 0xb9403c10,
++    0x35000650, 0xb9403810, 0x52b7f00e, 0x6b0e021f, 0x540005c1, 0xb9402810,
++    0x180005ce, 0x6b0e021f, 0x54000541, 0xb9402c10, 0x1800056e, 0x6b0e021f,
++    0x540004c1, 0xb9400810, 0xb940180e, 0x2a0e0210, 0x35000450, 0xbd400000,
++    0xbd401401, 0x1c000402, 0x1c001963, 0x1c0019a4, 0x1e223802, 0x1e20c042,
++    0x1e242040, 0x54000189, 0x1e202008, 0x540002ed, 0x1c0002e2, 0x1e222000,
++    0x54000288, 0x1e230842, 0x1e223822, 0x1e20c042, 0x1e242040, 0x540001e8,
++    0x1e231820, 0xb94059f0, 0x34000050, 0x1e270203, 0x1c000160, 0x1c0016c2,
++    0x1e231842, 0x1e2e1004, 0x1e245842, 0x1e220800, 0x1e230801, 0xbd000000,
++    0xbd001401, 0x52800028, 0xd65f03c0, 0x3fc5d182, 0xbf80068e, 0xc0000347,
++    0x1e221803, 0x1e241822, 0xa9bf43ef, 0x9000000f, 0x910001ef, 0xb94059ef,
++    0x340002cf, 0xb9404e70, 0x35000290, 0xadbe9be5, 0x3d800be7, 0xbd402665,
++    0xbd401266, 0x1e2618a5, 0x1e20c0a5, 0xf940626f, 0x2d451de6, 0x1e2718c6,
++    0x1e2618a5, 0x1e2e1006, 0x1e2558c6, 0x1e260842, 0x1e2e1006, 0x1e2518c5,
++    0x1e2658a5, 0x1e250863, 0x3dc00be7, 0xacc19be5, 0xa8c143ef, 0x14000000,
++    0x1e221922, 0xa9bf43ef, 0x9000000f, 0x910001ef, 0xb94059ef, 0x340002cf,
++    0xb9404eb0, 0x35000290, 0xadbe97e4, 0x3d800be6, 0xbd4026a4, 0xbd4012a5,
++    0x1e251884, 0x1e20c084, 0xf94062af, 0x2d4519e5, 0x1e2618a5, 0x1e251884,
++    0x1e2e1005, 0x1e2458a5, 0x1e250863, 0x1e2e1005, 0x1e2418a4, 0x1e255884,
++    0x1e240842, 0x3dc00be6, 0xacc197e4, 0xa8c143ef, 0x14000000, 0xf81f0fef,
++    0x9000000f, 0x910001ef, 0xb94059ef, 0x3400028f, 0xadbf0fe2, 0x1e2701e2,
++    0x1c000ce1, 0x1e221820, 0x1e211841, 0x1e2e1002, 0x1c000ca3, 0x1e230800,
++    0x1e224800, 0x1e230821, 0x1e224821, 0x1e200908, 0x1e20098c, 0x1e210929,
++    0x1e2109ad, 0xbd404be2, 0x1e210842, 0xbd004be2, 0xacc10fe2, 0xf84107ef,
++    0x1e293940, 0x14000000, 0xf81e0fef, 0x3d8007e7, 0x9000000f, 0x910001ef,
++    0xb94059ef, 0x3400022f, 0xadbf0be1, 0x1e2701e2, 0x1c000967, 0x1e2218e0,
++    0x1e271841, 0x1c000947, 0x1e270800, 0x1e270821, 0x1e2e1007, 0x1e274800,
++    0x1e274821, 0x1e20094a, 0x1e20096b, 0x1e210908, 0x1e210929, 0xacc10be1,
++    0x3dc007e7, 0xf84207ef, 0xbd400280, 0xd65f03c0, 0xb9400008, 0xf81f0fef,
++    0x9000000f, 0x910001ef, 0xb94059ef, 0x3400004f, 0x531f7908, 0xf84107ef,
++    0x14000000, 0xbd40ac01, 0x9000000f, 0x910001ef, 0xb94059ef, 0x3400014f,
++    0x1c000566, 0xbd40b007, 0x1e2720c0, 0x540000c1, 0x1e2701e7, 0x1e2718c6,
++    0x1e2e1010, 0x1e3048c6, 0x1e260821, 0x14000000, 0x2d558c02, 0x9000000f,
++    0x910001ef, 0xb94059ef, 0x3400014f, 0x1c000386, 0x1e2320c0, 0x540000e1,
++    0x1e2701e7, 0x1e2718c6, 0x1e2e1010, 0x1e3048c6, 0x1e260842, 0x1e2040e3,
++    0x14000000, 0xf81f0fef, 0x9000000f, 0x910001ef, 0xb94059ef, 0x340000ef,
++    0x1e200802, 0x1f010822, 0x1f0d09a2, 0x1e21c042, 0x1e290840, 0x14000006,
++    0x1e212000, 0x1e21cc00, 0x1e2021a0, 0x1e20cda0, 0x1e290800, 0xf84107ef,
++    0x14000000, 0x3fe38e39, 0x44a00000, 0x3f8ccccd, 0x3727c5ac, 0xa9bb2be9,
++    0xa90133eb, 0xa9023bed, 0xa90343ef, 0xf90023f1, 0xd53b4211, 0x9000000f,
++    0x910001ef, 0xb94059f0, 0x340003d0, 0xb94002a9, 0x1800058a, 0x6b0a013f,
++    0x54000341, 0xb9400ea9, 0x5286d78a, 0x6b0a013f, 0x540000e0, 0x52856c8a,
++    0x6b0a013f, 0x54000261, 0x5800038d, 0xd2819b8e, 0x14000003, 0x580002ed,
++    0xd2816b8e, 0xaa1503ea, 0x5800030b, 0x5800032c, 0x38401548, 0xca08016b,
++    0x9b0c7d6b, 0x51000529, 0x35ffff89, 0xeb0d017f, 0x54000081, 0xb82e6abf,
++    0x52800030, 0xb900a1f0, 0xd51b4211, 0xf94023f1, 0xa94343ef, 0xa9423bed,
++    0xa94133eb, 0xa8c52be9, 0x79400ea8, 0x14000000, 0x7f41e3bf, 0x1e453d08,
++    0xfd75c925, 0xb7299d38, 0x84222325, 0xcbf29ce4, 0x000001b3, 0x00000100,
++    0x54594c46, 0xa9be43ef, 0xa9017bf1, 0xd2800111, 0x94000015, 0xa9417bf1,
++    0xa8c243ef, 0xd102c3ff, 0x14000000, 0xa9bd3fee, 0xa90147f0, 0xa9027bed,
++    0xd53b420d, 0xf940000e, 0x90000010, 0x91000210, 0xeb1001df, 0x54000061,
++    0xd2800211, 0x94000006, 0xd51b420d, 0xa9427bed, 0xa94147f0, 0xa8c33fee,
++    0xd65f03c0, 0x9000000f, 0x910001ef, 0xf94055f0, 0x8b1101ef, 0xc89ffdf0,
++    0xd65f03c0, 0xf94055f0, 0x2a1f03e8, 0xf94059f1, 0xb40000b1, 0xcb110211,
++    0xf1000a3f, 0x54000048, 0x52800028, 0xd65f03c0, 0xa9bf7be0, 0x91004000,
++    0x94000003, 0xa8c17be0, 0xd65f03c0, 0xa9bf7bef, 0x97fffeb2, 0x34000248,
++    0x1cfff2a1, 0xb94059f0, 0x34000050, 0x1e270201, 0x1cfff222, 0x1e222020,
++    0x5400016a, 0x97ffffe8, 0x34000128, 0x1e221821, 0x1e2e1002, 0x1e213841,
++    0xbd401803, 0xbd4085e4, 0x1e241821, 0x1e212861, 0xbd001801, 0xa8c17bef,
++    0xd65f03c0, 0x2d411905, 0xa9be3fee, 0xa90147f0, 0xadbe9fe0, 0x3d800bf0,
++    0xd53b4211, 0x9000000f, 0x910001ef, 0xb94059f0, 0x340002d0, 0xb9404e70,
++    0x35000290, 0xbd401267, 0xbd402670, 0x1e271a10, 0x1cffee67, 0x1e271a10,
++    0x1e2e1007, 0x1e3038f0, 0xbd402a67, 0x1e2020e8, 0x5400014d, 0x1e3038e0,
++    0x1e20c000, 0x1cffedb0, 0x1e302000, 0x540000a8, 0x1e2c1010, 0x1e2608e7,
++    0x1e3008e7, 0x1e273842, 0xd51b4211, 0x3dc00bf0, 0xacc19fe0, 0xa94147f0,
++    0xa8c23fee, 0x14000000, 0xa9bf7be1, 0x94000000, 0xf94003e2, 0xaa1303e0,
++    0xaa1403e1, 0x94000004, 0xf94007fe, 0x910043ff, 0xd65f03c0, 0xf81f0ffe,
++    0x2a1f03e3, 0x94000203, 0xf84107fe, 0x35001708, 0x9000000f, 0x910001ef,
++    0xb94059f0, 0x34001690, 0xb94059f0, 0x34001650, 0xf9405810, 0x9257fa10,
++    0x5800160e, 0xeb0e021f, 0x54001780, 0x580015ee, 0xeb0e021f, 0x54001720,
++    0x39416c10, 0x12000e0e, 0x710021df, 0x540014c8, 0x12000610, 0x35001490,
++    0xb940b010, 0x18001d2e, 0x6b0e021f, 0x54000400, 0x18001cee, 0x6b0e021f,
++    0x540003a0, 0x18001cae, 0x6b0e021f, 0x54000340, 0x18001c6e, 0x6b0e021f,
++    0x540002e0, 0x18001c2e, 0x6b0e021f, 0x54000280, 0x18001bee, 0x6b0e021f,
++    0x54000220, 0xf9405810, 0x58001b8e, 0xeb0e021f, 0x54000160, 0x58001b6e,
++    0xeb0e021f, 0x54000080, 0x58001b4e, 0xeb0e021f, 0x540010e1, 0x79417010,
++    0x7100c21f, 0x54001081, 0x14000003, 0x3942e010, 0x35001030, 0x2a1f03eb,
++    0x2d4a0400, 0x1e202008, 0x54000fad, 0x1e202028, 0x54000f6d, 0xf9406030,
++    0xb4000f30, 0x2d450e02, 0x1e222000, 0x54000ec1, 0x1e232020, 0x54000e81,
++    0xbd421044, 0xbd421445, 0x1e202080, 0x54000e01, 0x1e2120a0, 0x54000dc1,
++    0xb9404c30, 0x35000d90, 0xbd402422, 0xbd401023, 0x1e202068, 0x54000d0d,
++    0x1e231842, 0xbd4059e4, 0x1e243845, 0x1e20c0a5, 0x1cffdfc6, 0x1e2408c6,
++    0x1e2620a0, 0x54000c08, 0xf9406031, 0x2d451223, 0x1e241863, 0x1e231842,
++    0x1e202048, 0x54000b4d, 0x1e2e1003, 0x1e232040, 0x5400028c, 0x54000aca,
++    0x1e221863, 0x1e230824, 0xbd021444, 0x1e2c1005, 0x1e213884, 0x1e250884,
++    0xbd402826, 0x1e2108c6, 0x1e2308c6, 0x1f0510c4, 0xbd421c45, 0x1e252884,
++    0xbd021c44, 0x3500090b, 0xd2801c90, 0xd2800209, 0xd280040a, 0x14000022,
++    0x350001cb, 0x1e204043, 0x1e230804, 0xbd021044, 0x1e203884, 0x1e2c1005,
++    0x1e250884, 0xbd421845, 0x1e2438a5, 0xbd021845, 0xd2801c10, 0xd2800409,
++    0xd280020a, 0x14000014, 0xbd405000, 0xbd421044, 0x1e242000, 0x54000641,
++    0x1e2e1003, 0x1e233842, 0xbd402a23, 0x1e230842, 0x1e2c1003, 0x1e230842,
++    0x1e222884, 0xbd021044, 0x3942c810, 0x7101321f, 0x540004e1, 0xbd421844,
++    0x1e223884, 0xbd021844, 0x14000023, 0x5280006e, 0xd280310d, 0x3943c40c,
++    0x38ed6831, 0x6b0c023f, 0x54000322, 0xbc706840, 0x8b0a0211, 0xbc716841,
++    0x1e203821, 0x1e2c1002, 0x1e204064, 0x1e2e1005, 0x1e253884, 0x1e220884,
++    0x1e210884, 0x1e243800, 0xbc306840, 0x8b090211, 0xbc716840, 0x1e243800,
++    0xbc316840, 0x8b0a0211, 0xbc716840, 0x1e242800, 0xbc316840, 0x9100c211,
++    0xbc716840, 0x1e242800, 0xbc316840, 0x910005ad, 0x91010210, 0x710005ce,
++    0x54fffc41, 0xd65f03c0, 0x5f4c5f50, 0x00003030, 0x5f525f50, 0x00003030,
++    0x69435f50, 0x656c6372, 0x6e495f4e, 0x5f74754f, 0x746f6f52, 0x656e6150,
++    0x44f00000, 0x44870000, 0x41f00000, 0x41f00000, 0xf9400c11, 0xb4fffe11,
++    0xf9405a30, 0x58fffe6e, 0xeb0e021f, 0x54fffd81, 0xb940ba30, 0x3942d40d,
++    0x53103dad, 0x52860bee, 0x2a0d01ce, 0x6b0e021f, 0x54fffca1, 0xf9400e31,
++    0xb4fffc71, 0xf9405a30, 0x58fffd0e, 0xeb0e021f, 0x54fffbe1, 0xb940ba30,
++    0x3942d40d, 0x53185dad, 0x5280060e, 0x2a0d01ce, 0x6b0e021f, 0x54fffb01,
++    0xf9402a30, 0x58fffc6e, 0xeb0e021f, 0x54fffa81, 0xf9400e31, 0xb4fffa51,
++    0xf9405a30, 0x58fffb2e, 0xeb0e021f, 0x54fff9c1, 0x3942e230, 0x35fff990,
++    0xf9402a30, 0x58fffaae, 0xeb0e021f, 0x54fff901, 0xf9406031, 0xb4fff8d1,
++    0xf9401630, 0xeb0e021f, 0x54fff861, 0xbd405401, 0xbd402e22, 0x1e222020,
++    0x54fff7e1, 0xbd421442, 0x1e222020, 0x54fff781, 0x5280002b, 0x17ffff4d,
++    0x47425f50, 0x67425f50, 0x6f445f50, 0x6f435f50, 0x6c415f50, 0x74535f50,
++    0x65545f50, 0x30305f78, 0x61425f50, 0x305f6573, 0x61465f50, 0x305f6564,
++    0x2a1f03e8, 0xf940580e, 0x58000b4f, 0xeb0f01df, 0x54000421, 0xb940b80e,
++    0x5286060f, 0x6b0f01df, 0x540003a1, 0xf940280e, 0x58000acf, 0xeb0f01df,
++    0x54000321, 0xf9400c11, 0xb40002f1, 0xf9402a2e, 0x58000a4f, 0xeb0f01df,
++    0x54000261, 0xf9401411, 0x9100800e, 0xeb0e023f, 0x540001e0, 0xb40001d1,
++    0xd1002231, 0xf9405a2e, 0x5800088f, 0xeb0f01df, 0x54000121, 0xb940ba2e,
++    0x5286060f, 0x6b0f01df, 0x540000a1, 0xf9402a2e, 0x5800084f, 0xeb0f01df,
++    0x1a9f17e8, 0xd65f03c0, 0xa9bd7be8, 0xa9013fee, 0xa90247f0, 0xd53b4210,
++    0x9000000f, 0x910001ef, 0xb94059f1, 0x34000091, 0x97ffffd2, 0x34000048,
++    0x32000063, 0xd51b4210, 0xa94247f0, 0xa9413fee, 0xa8c37be8, 0xfc1b0fe8,
++    0x14000000, 0xa9bc7be8, 0xa9013fee, 0xa90247f0, 0xf9001bed, 0xadbf07e0,
++    0xd53b420d, 0x9000000f, 0x910001ef, 0xb94059f1, 0x34000291, 0x97ffffbf,
++    0x34000248, 0x9000000f, 0x910001ef, 0xb94059f0, 0x340001d0, 0xb94059f0,
++    0x34000190, 0x1cffbf80, 0x1e270201, 0x1e202020, 0x5400010a, 0x97fffe52,
++    0x350000c8, 0x1e211800, 0x1e2e1001, 0x1e213800, 0x1c000281, 0x1f018c03,
++    0xd51b420d, 0xacc107e0, 0xf9401bed, 0xa94247f0, 0xa9413fee, 0xa8c47be8,
++    0x53067d4a, 0x14000000, 0x6e495f4e, 0x5f74754f, 0x6c415f4e, 0x5f6e6769,
++    0x41f00000, 0x41f00000, 0x44f00000, 0x44870000, 0x44e24000, 0x42c80000,
++    0x44070000, 0xa9bf7be0, 0x94000004, 0xa8c17be0, 0x39442808, 0x14000000,
++    0xa9bc37e8, 0xa9013fee, 0xa90247f0, 0xa9037be0, 0xd53b420d, 0xf940000e,
++    0x9000000f, 0x910001ef, 0xeb0f01df, 0x54000b41, 0xf940580e, 0x58000bef,
++    0xeb0f01df, 0x54000ac1, 0xb940b80e, 0x5286260f, 0x6b0f01df, 0x54000a41,
++    0xf940280e, 0x58000caf, 0xeb0f01df, 0x540009c1, 0xf9400c11, 0xb4000991,
++    0xf9405a2e, 0x58000a6f, 0xeb0f01df, 0x54000901, 0xb940ba2e, 0x5286260f,
++    0x6b0f01df, 0x54000881, 0xf9402a2e, 0x58000b2f, 0xeb0f01df, 0x54000801,
++    0xf9400e31, 0xb40007d1, 0xf9405a2e, 0x580008ef, 0xeb0f01df, 0x54000741,
++    0xb940ba2e, 0x5286260f, 0x6b0f01df, 0x540006c1, 0xf9402a2e, 0x5800096f,
++    0xeb0f01df, 0x54000641, 0xf9400e31, 0xb4000611, 0xf9405a2e, 0x5800076f,
++    0xeb0f01df, 0x54000120, 0x5800074f, 0xeb0f01df, 0x54000521, 0x3942e22e,
++    0x350004ee, 0xf9400e31, 0xb40004b1, 0x14000009, 0x3942e22e, 0x3500044e,
++    0xf9400e31, 0xb4000411, 0xf9405a2e, 0x5800062f, 0xeb0f01df, 0x54000260,
++    0xf9405a2e, 0x5800056f, 0xeb0f01df, 0x54000301, 0xb940ba2e, 0x5280060f,
++    0x6b0f01df, 0x54000281, 0xf9402a2e, 0x580005af, 0xeb0f01df, 0x54000201,
++    0xf9400e31, 0xb40001d1, 0xf9405a2e, 0x580003ef, 0xeb0f01df, 0x54000141,
++    0xf9402a2e, 0x5800042f, 0xeb0f01df, 0x540000c1, 0x9000000f, 0x910001ef,
++    0xf94055f0, 0x9100e1ef, 0xc89ffdf0, 0xd51b420d, 0xa9437be0, 0xa94247f0,
++    0xa9413fee, 0xa8c437e8, 0xd65f03c0, 0xd503201f, 0x61425f57, 0x5f4c6573,
++    0x63535f4e, 0x5f656c61, 0x61565f4e, 0x5f64696c, 0x74425f4c, 0x30305f6e,
++    0x74425f4c, 0x31305f6e, 0x6f4c5f4e, 0x305f706f, 0x6f525f4e, 0x0000746f,
++    0x43d20000, 0x42f00000, 0x41f00000, 0x42200000, 0x41200000, 0x42d80000,
++    0x41f00000, 0x41f00000, 0xa9bf7be1, 0x94000000, 0xf94003e2, 0xd1010042,
++    0xaa1303e0, 0xaa1403e1, 0x52800023, 0x94000003, 0xa8c17be1, 0xd65f03c0,
++    0x9000000f, 0x910001ef, 0xb94059ee, 0x3400324e, 0xb94059ee, 0x3400320e,
++    0x1e2701c0, 0x1cffa901, 0x1e212000, 0x54003180, 0xf9406030, 0xb4003150,
++    0xf9401a11, 0xb4003111, 0xb940022e, 0x1800312d, 0x6b0d01df, 0x54000560,
++    0x180030ed, 0x6b0d01df, 0x54000081, 0x3940122e, 0x340004ce, 0x1400017e,
++    0xf940022e, 0x5800302d, 0xeb0d01df, 0x54000121, 0xb9400a2e, 0x18002fed,
++    0x6b0d01df, 0x54002ec1, 0x79401a2e, 0x710195df, 0x54000340, 0x14000172,
++    0x58002f2d, 0xeb0d01df, 0x54000121, 0xb9400a2e, 0x18002eed, 0x6b0d01df,
++    0x54002d61, 0x79401a2e, 0x7101d1df, 0x540001e0, 0x14000167, 0x58002e2d,
++    0xeb0d01df, 0x54002c81, 0xf940062e, 0x58002ded, 0xeb0d01df, 0x54002c01,
++    0xb940122e, 0x18002dad, 0x6b0d01df, 0x54002b81, 0x3940522e, 0x35002b4e,
++    0xf940160e, 0x58002d0d, 0xeb0d01df, 0x54002a81, 0xf940580a, 0x10002ce9,
++    0x5280024b, 0xa8c1352c, 0x8a0d014e, 0xeb0c01df, 0x54000080, 0x5100056b,
++    0x35ffff6b, 0x1400014a, 0xb9404c2e, 0x3500290e, 0xb940482e, 0x52b7f00d,
++    0x6b0d01df, 0x54002881, 0xf940202e, 0x920079ce, 0xb500282e, 0xbd401020,
++    0xbd402421, 0x1e202008, 0x540027ad, 0x1e202028, 0x5400276d, 0x1e201822,
++    0xbd4059e3, 0x1e233842, 0x1e20c042, 0x1cff9ebe, 0x1e3e0863, 0x1e232040,
++    0x54002668, 0xd280000b, 0xf86b684c, 0x9100402a, 0xf86b694d, 0xeb0d019f,
++    0x540025a1, 0x9100216b, 0xf101017f, 0x54ffff21, 0xd280000b, 0x91010049,
++    0x9102002a, 0xf86b692c, 0xf86b694d, 0xeb0d019f, 0x54002461, 0x9100216b,
++    0xf100c17f, 0x54ffff41, 0xbd404442, 0x1e202048, 0x540023a1, 0xbd405042,
++    0x1e202048, 0x54002341, 0xbd406042, 0x1e202048, 0x540022e1, 0xbd406442,
++    0x1e202048, 0x54002281, 0xbd404044, 0xbd405445, 0xbd404c46, 0xbd405c47,
++    0xbd406c5d, 0x1e202088, 0x540021a0, 0x1e2020a8, 0x54002160, 0x1e2023a8,
++    0x5400212a, 0x1e2143bd, 0x1e201bba, 0x1e211bbb, 0x2d456618, 0x1e2c101f,
++    0x1e3f0b18, 0x1e3f0b39, 0xbd40183c, 0x1e3a0b9c, 0xbd40283d, 0x1e3b0bbd,
++    0x1e3c3b54, 0x1e383a94, 0x1e3c2b55, 0x1e383ab5, 0x1e3d3b76, 0x1e393ad6,
++    0x1e3d2b77, 0x1e393af7, 0x1e2703ff, 0x1e3f4a94, 0x1e3f4ab5, 0x1e3f4ad6,
++    0x1e3f4af7, 0x2d4a0400, 0xbd421842, 0xbd421c43, 0x35000103, 0xbd42105c,
++    0xbd42145d, 0x1e202380, 0x54001d21, 0x1e2123a0, 0x54001ce1, 0x14000024,
++    0xbd42105c, 0xbd42145d, 0x1e2c101f, 0x1e3f081e, 0x1e3e2380, 0x54001c01,
++    0x1e3f083e, 0x1e3e23a0, 0x54001ba1, 0x1e202048, 0x54001b61, 0x1e202068,
++    0x54001b21, 0x39416c0e, 0x120005cd, 0x71000dbf, 0x54001aa0, 0x1e2703e2,
++    0x3500008d, 0x1e3f0802, 0x1e214042, 0x14000004, 0x710009bf, 0x54000041,
++    0x1e214002, 0x53020dcd, 0x71000dbf, 0x54001940, 0x1e2703e3, 0x3500006d,
++    0x1e3f0823, 0x14000004, 0x710009bf, 0x54000041, 0x1e204023, 0x1f021890,
++    0x1e202840, 0x1f001891, 0x1e315a1c, 0x1e314a11, 0x1e204390, 0x1f031cb2,
++    0x1e213861, 0x1f011cb3, 0x1e335a5c, 0x1e334a53, 0x1e204392, 0x1c00195f,
++    0x1e20c21c, 0x1e3f2380, 0x54001662, 0x1e20c23c, 0x1e3f2380, 0x54001602,
++    0x1e20c25c, 0x1e3f2380, 0x540015a2, 0x1e20c27c, 0x1e3f2380, 0x54001542,
++    0x1e352a9c, 0x1e372add, 0x1e3d2b9c, 0x1e3f2380, 0x540014a2, 0x1cff8c7e,
++    0x1e3e0b1c, 0x1e3e0b3d, 0x1e21431e, 0x1e3c2bde, 0x1e3e2200, 0x5400006c,
++    0x1e343a14, 0x14000002, 0x1e204214, 0x1e3c3b1e, 0x1e3e2220, 0x5400006b,
++    0x1e352a35, 0x14000002, 0x1e204235, 0x1e21433e, 0x1e3d2bde, 0x1e3e2240,
++    0x5400006c, 0x1e363a56, 0x14000002, 0x1e204256, 0x1e3d3b3e, 0x1e3e2260,
++    0x5400006b, 0x1e372a77, 0x14000002, 0x1e204277, 0x1e302280, 0x540000e1,
++    0x1e3122a0, 0x540000a1, 0x1e3222c0, 0x54000061, 0x1e3322e0, 0x54001000,
++    0x35000543, 0xbd405000, 0x1e240800, 0x1e260011, 0x37f80091, 0x1e204280,
++    0x1e343aa1, 0x14000003, 0x1e2042a0, 0x1e353a81, 0x1e263800, 0x1e241800,
++    0x1e241821, 0xbd405402, 0x1e250842, 0x1e260051, 0x37f80091, 0x1e2042e2,
++    0x1e363ae3, 0x14000003, 0x1e2042c2, 0x1e373ac3, 0x1e273842, 0x1e251842,
++    0x1e251863, 0x1e20c01c, 0x1e3f2380, 0x54000c82, 0x1e20c03c, 0x1e3f2380,
++    0x54000c22, 0x1e20c05c, 0x1e3f2380, 0x54000bc2, 0x1e20c07c, 0x1e3f2380,
++    0x54000b62, 0xbd021041, 0xbd021443, 0xbd021840, 0xbd021c42, 0x14000056,
++    0x1e303a20, 0x1e323a61, 0x1e202008, 0x540003cd, 0x1e202028, 0x5400038d,
++    0x1e343aa2, 0x1e363ae3, 0x1e201842, 0x1e211863, 0x1e3038c0, 0x1e3238e1,
++    0x1f025000, 0x1f035821, 0x1e220884, 0x1e2308a5, 0x1e20c09c, 0x1e3f2380,
++    0x54000862, 0x1e20c0bc, 0x1e3f2380, 0x54000802, 0x1e20c01c, 0x1e3f2380,
++    0x540007a2, 0x1e20c03c, 0x1e3f2380, 0x54000742, 0xbd004044, 0xbd005445,
++    0xbd004c40, 0xbd005c41, 0x14000035, 0x1e343aa0, 0x1e363ae1, 0x1e20c082,
++    0x1e20c0a3, 0x1e221800, 0x1e231821, 0x1e2c101c, 0x1e3c0800, 0x1e3c0821,
++    0xb9405011, 0x36f80051, 0x1e214000, 0xb9405411, 0x36f80051, 0x1e214021,
++    0x1e352a82, 0x1e372ac3, 0x1e3c0842, 0x1e3c0863, 0x39416c0e, 0x120005cd,
++    0x340000ed, 0x1e20401d, 0x710009bf, 0x54000041, 0x1e2143bd, 0x1e3d089d,
++    0x1e3d3842, 0x53020dcd, 0x340000ed, 0x1e21403d, 0x710009bf, 0x54000041,
++    0x1e2143bd, 0x1e3d08bd, 0x1e3d3863, 0x1e20c01c, 0x1e3f2380, 0x540001c2,
++    0x1e20c03c, 0x1e3f2380, 0x54000162, 0x1e20c05c, 0x1e3f2380, 0x54000102,
++    0x1e20c07c, 0x1e3f2380, 0x540000a2, 0xbd021040, 0xbd021441, 0xbd004c42,
++    0xbd005c43, 0x52800028, 0xd65f03c0, 0x2a1f03e8, 0xd65f03c0, 0xd503201f,
++    0x65706957, 0x65646146, 0x65646956, 0x6d61676f, 0x64614665, 0x7069574c,
++    0x6d695465, 0x69644565, 0x756f6c43, 0x6c734964, 0x57646e61, 0x44657069,
++    0x6d616572, 0x44f00000, 0x44870000, 0x7f800000, 0x61425f50, 0x005f6573,
++    0xffffffff, 0x00ffffff, 0x61425f50, 0x005f6b63, 0xffffffff, 0x00ffffff,
++    0x61465f50, 0x005f6564, 0xffffffff, 0x00ffffff, 0x67425f50, 0x0000005f,
++    0xffffffff, 0x000000ff, 0x47425f50, 0x0000005f, 0xffffffff, 0x000000ff,
++    0x69575f50, 0x00006570, 0xffffffff, 0x0000ffff, 0x754f5f50, 0x00000074,
++    0xffffffff, 0x000000ff, 0x70555f50, 0x0000005f, 0xffffffff, 0x000000ff,
++    0x6f445f50, 0x005f6e77, 0xffffffff, 0x00ffffff, 0x61505f50, 0x72657474,
++    0xffffffff, 0xffffffff, 0x5f4c5f50, 0x00000000, 0xffffffff, 0x00000000,
++    0x5f525f50, 0x00000000, 0xffffffff, 0x00000000, 0x5f545f50, 0x00000000,
++    0xffffffff, 0x00000000, 0x5f425f50, 0x00000000, 0xffffffff, 0x00000000,
++    0x4e4c5f50, 0x616d726f, 0xffffffff, 0xffffffff, 0x4e525f50, 0x616d726f,
++    0xffffffff, 0xffffffff, 0x4e545f50, 0x616d726f, 0xffffffff, 0xffffffff,
++    0x4e425f50, 0x616d726f, 0xffffffff, 0xffffffff,
++]
++symbols = {'_dm_view_area': 824, '_dm_view_backdrop': 1844, '_dm_view_backdrop_call': 1808, '_dm_view_cache': 64, '_dm_view_capture': 600, '_dm_view_create': 716, '_dm_view_footer_match': 2928, '_dm_view_footer_recalc': 3080, '_dm_view_footer_y': 3148, '_dm_view_keyboard_frame': 1396, '_dm_view_keyboard_window': 3360, '_dm_view_keyboard_window_call': 3340, '_dm_view_layout': 1172, '_dm_view_matrix': 0, '_dm_view_near_xy': 1024, '_dm_view_near_y': 964, '_dm_view_panel_projection': 1572, '_dm_view_scissor': 480, '_dm_view_scissor_origin': 1660, '_dm_view_sphere': 1084, '_dm_view_touch_page': 1428, '_dm_view_transition': 3912, '_dm_view_transition_fast_call': 3872, '_dm_view_ui_override': 220, '_dm_view_ui_projection': 1552, '_dm_view_units': 928}
++relocations = [(4, 3, '_dm_view_state'), (8, 4, '_dm_view_state'), (60, 2, '_dm_return_037e5978'), (72, 3, '_dm_view_state'), (76, 4, '_dm_view_state'), (108, 3, '_dm_code_04a65608'), (112, 4, '_dm_code_04a65608'), (140, 3, '_dm_view_state'), (144, 4, '_dm_view_state'), (244, 3, '_dm_view_state'), (248, 4, '_dm_view_state'), (492, 3, '_dm_view_state'), (496, 4, '_dm_view_state'), (596, 2, '_dm_return_03a308f0'), (608, 3, '_dm_view_state'), (612, 4, '_dm_view_state'), (712, 2, '_dm_return_03a2eac0'), (720, 3, '_dm_view_state'), (724, 4, '_dm_view_state'), (820, 2, '_dm_return_013a29a8'), (832, 3, '_dm_view_state'), (836, 4, '_dm_view_state'), (936, 3, '_dm_view_state'), (940, 4, '_dm_view_state'), (960, 2, '_dm_return_01462bb8'), (968, 3, '_dm_view_state'), (972, 4, '_dm_view_state'), (1020, 2, '_dm_return_037e5a50'), (1028, 3, '_dm_view_state'), (1032, 4, '_dm_view_state'), (1080, 2, '_dm_return_037e5a80'), (1088, 3, '_dm_view_state'), (1092, 4, '_dm_view_state'), (1152, 2, '_dm_return_013a37c8'), (1196, 3, '_dm_view_state'), (1200, 4, '_dm_view_state'), (1356, 2, '_dm_return_00268ee4'), (1424, 2, '_dm_return_03268180'), (1448, 3, '_dm_code_049adc80'), (1452, 4, '_dm_code_049adc80'), (1492, 3, '_dm_view_state'), (1496, 4, '_dm_view_state'), (1684, 3, '_dm_view_state'), (1688, 4, '_dm_view_state'), (1804, 2, '_dm_return_03a30988'), (1812, 2, '_dm_code_00264a10'), (1864, 3, '_dm_view_state'), (1868, 4, '_dm_view_state'), (3096, 3, '_dm_view_state'), (3100, 4, '_dm_view_state'), (3144, 2, '_dm_return_0027d4c4'), (3172, 3, '_dm_view_state'), (3176, 4, '_dm_view_state'), (3196, 3, '_dm_view_state'), (3200, 4, '_dm_view_state'), (3292, 2, '_dm_return_0027d7c0'), (3356, 2, '_dm_return_0029a18c'), (3384, 3, '_dm_code_0474de58'), (3388, 4, '_dm_code_0474de58'), (3736, 3, '_dm_view_state'), (3740, 4, '_dm_view_state'), (3876, 2, '_dm_code_00265220'), (3912, 3, '_dm_view_state'), (3916, 4, '_dm_view_state')]
++# ==== END GENERATED VIEW CODE ====
++
++def relocated_words(words, relocations, symbols, address, state):
++    """Resolve the adapter's ARM64 relocations; _dm_view_state becomes the frame step page."""
++    result = list(words)
++    for offset, kind, name in relocations:
++        assert offset % 4 == 0 and 0 <= offset < 4 * len(result), 'adapter relocation outside code'
++        pc = address + offset; word = result[offset // 4]
++        if name == '_dm_view_state': target = state
++        elif name.startswith('_dm_return_'): target = int(name[len('_dm_return_'):], 16)
++        elif name.startswith('_dm_code_'): target = int(name[len('_dm_code_'):], 16)
++        elif name in symbols: target = address + symbols[name]
++        else: raise ValueError('Unknown adapter relocation: ' + name)
++        if kind == 2:
++            assert word & 0x7c000000 == 0x14000000
++            result[offset//4] = (word & 0xfc000000) | (B(pc, target) & 0x3ffffff)
++        elif kind == 3:
++            assert word & 0x9f000000 == 0x90000000
++            result[offset//4] = ADRP(word & 31, pc, target)
++        elif kind == 4:
++            assert word & 0xffc00000 == 0x91000000
++            result[offset//4] = (word & ~(0xfff << 10)) | ((target & 0xfff) << 10)
++        else: raise ValueError('Unknown adapter relocation kind')
++    return result
++
++
++# Adapter sites, keyed by the 3.0.3 main build ID. 0x265140 is absent: the
++# chained bit 6 stub owns that site (one rewrite site per address).
++_view_sites = [
++    (0x4a65660, "68597e0300000000"),
++    (0x474de58 + 21*8, struct.pack("<Q", 0x29a17c).hex()),
++    (0x269134, "000d40bd602a00bd001140bd08710091682603a9602e00bd"),
++]
++_view_hooks = [(0x283e9c,"e184ff97","_dm_view_transition_fast_call",True),
++        (0x29a188,"08284439","_dm_view_keyboard_window_call",False),
++        (0x27d4c0,"e80f1bfc","_dm_view_footer_recalc",False),
++        (0x27d7bc,"4a7d0653","_dm_view_footer_y",False),
++        (0x326817c,"ffc302d1","_dm_view_keyboard_frame",False),
++        (0x2af1258,"c0035fd6","_dm_view_touch_page",False),
++        (0x3a30984,"0519412d","_dm_view_scissor_origin",False),
++        (0x284048,"7282ff97","_dm_view_backdrop_call",True),
++        (0x2840e4,"4b82ff97","_dm_view_backdrop_call",True),
++        (0x268ee0,"a80e4079","_dm_view_layout",False),
++        (0x5ce924,"00210091","_dm_view_ui_override",False),
++        (0x37e5974,"0188552d","_dm_view_matrix",False),
++        (0x3a308e8,"0318221e2218241e","_dm_view_scissor",False),
++        (0x3a2eabc,"2219221e","_dm_view_capture",False),
++        (0x13a29a4,"4039291e","_dm_view_create",False),
++        (0x1126144,"800240bd","_dm_view_area",True),
++        (0x1125fe4,"800240bd","_dm_view_area",True),
++        (0x1462bb4,"080040b9","_dm_view_units",False),
++        (0x37e5a4c,"01ac40bd","_dm_view_near_y",False),
++        (0x37e5a7c,"028c552d","_dm_view_near_xy",False),
++        (0x13a37b4,"0020211e00cc211ea021201ea0cd201e0008291e","_dm_view_sphere",False),
++]
++_view_caches = [(0x15083c,20,8,"88224039"),
++        (0x2b8888,0,8,"08204039"),
++        (0x5ce93c,19,8,"68224039"),
++        (0x31c3074,20,8,"88224039"),
++        (0x3268228,21,8,"a8224039"),
++        (0x37b0eec,19,8,"68224039"),
++        (0x37c1b0c,25,8,"28234039"),
++        (0x37e5654,0,8,"08204039"),
++        (0x38189d8,3,8,"68204039"),
++        (0x3818a34,22,8,"c8224039"),
++        (0x3818c70,24,8,"08234039"),
++        (0x3819a08,24,8,"08234039"),
++        (0x384225c,23,8,"e8224039"),
++        (0x38423d8,23,8,"e8224039"),
++        (0x386a888,21,8,"a8224039"),
++        (0x3883a94,20,8,"88224039"),
++        (0x389ebc0,21,8,"a8224039"),
++        (0x3908dc8,19,8,"68224039"),
++        (0x39af314,20,9,"89224039"),
++        (0x39af334,20,9,"89224039"),
++        (0x3a77ac4,27,8,"68234039"),
++        (0x3a789d4,24,8,"08234039"),
++        (0x3ab6100,21,8,"a8224039"),
++        (0x3ab7190,24,8,"08234039"),
++        (0x3abb650,21,8,"a8224039"),
++        (0x3abc700,24,8,"08234039"),
++        (0x3b2235c,26,8,"48234039"),
++        (0x3b55694,20,8,"88224039"),
++        (0x3db2bf0,27,8,"68234039"),
++]
++
++
+ _size_sites = [
+-    # (site, the stub's words after ADRP x16 (state), the last one the site's original instruction, reason)
++    # (site, the stub's items after ADRP x16 (state), the last one the site's original instruction, reason)
+     (0x5c9b80, [
+         0xb9405611,   # ldr w17, [x16, #0x54]   sites
+-        0x360000d1,   # tbz w17, #0, orig
++        ('tbz', 17, 0, 'orig'),
+         0xb9404a11,   # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
+-        0x34000091,   # cbz w17, orig
++        ('cbz', 17, 'orig'),
+         0x1b117d28,   # mul w8, w9, w17         height = width x the output's height / 1920 (each mode of the table: 960 → 672, 1280 → 896, 1920 → 1344)
+         0x5280f011,   # mov w17, #1920
+         0x1ad10908,   # udiv w8, w8, w17
++        'orig',
+         0x290c2029,   # orig: stp w9, w8, [x1, #0x60]
+     ], 'graphics create arg +0x60: the display size in the screen\'s shape (bit 0)'),
+     (0x5c9b94, [
+         0xb9405611,   # ldr w17, [x16, #0x54]
+-        0x36080091,   # tbz w17, #1, orig
++        ('tbz', 17, 1, 'orig'),
+         0xb9404e11,   # ldr w17, [x16, #0x4c]   the layout height (0 = 16:9)
+-        0x34000051,   # cbz w17, orig
++        ('cbz', 17, 'orig'),
+         0xb3607e28,   # bfi x8, x17, #32, #32   1280 x the layout height
++        'orig',
+         0xf9001028,   # orig: str x8, [x1, #0x20]
+     ], 'graphics create arg +0x20: 1280 x the layout height (bit 1)'),
+     (0x5cdd74, [
+         0xb9405611,   # ldr w17, [x16, #0x54]
+-        0x361000d1,   # tbz w17, #2, orig
++        ('tbz', 17, 2, 'orig'),
+         0xb9404a11,   # ldr w17, [x16, #0x48]
+-        0x34000091,   # cbz w17, orig
++        ('cbz', 17, 'orig'),
+         0x1b117d28,   # mul w8, w9, w17
+         0x5280f011,   # mov w17, #1920
+         0x1ad10908,   # udiv w8, w8, w17
++        'orig',
+         0x29002149,   # orig: stp w9, w8, [x10]
+     ], 'platform config slot 7: the static display size in the screen\'s shape (bit 2)'),
+     (0x5cddd4, [
+         0xb9405611,   # ldr w17, [x16, #0x54]
+-        0x361800b1,   # tbz w17, #3, orig
++        ('tbz', 17, 3, 'orig'),
+         0xb9404e11,   # ldr w17, [x16, #0x4c]
+-        0x34000071,   # cbz w17, orig
++        ('cbz', 17, 'orig'),
+         0xb9405211,   # ldr w17, [x16, #0x50]   the layout height as a float
+         0xb3607e29,   # bfi x9, x17, #32, #32   1280.0 x the layout height
++        'orig',
+         0xf9029d09,   # orig: str x9, [x8, #0x538]
+     ], 'platform config slot 8: the static layout size 1280.0 x the layout height (bit 3)'),
+     (0x5cdcc8, [
+         0xb9405611,   # ldr w17, [x16, #0x54]
+-        0x36200091,   # tbz w17, #4, orig
++        ('tbz', 17, 4, 'orig'),
+         0xb9404a11,   # ldr w17, [x16, #0x48]
+-        0x34000051,   # cbz w17, orig
++        ('cbz', 17, 'orig'),
+         0xb3607e28,   # bfi x8, x17, #32, #32   1920 x the output's height
++        'orig',
+         0xf8014028,   # orig: stur x8, [x1, #0x14]
+     ], 'platform config slot 3: the arg\'s 1920x1080 in the screen\'s shape (bit 4)'),
+ ]
+@@ -71,16 +418,49 @@ _pane_draw_self = 0x27e2c8   # nn::ui2d::Pane::DrawSelf (vtable main+0x474d1f8 s
+ _tanf_plt, _atanf_plt = 0x3f03330, 0x3f03360   # main's PLT stubs of the SDK's tanf, atanf
+ 
+ 
+-def _bl(frm, to): return 0x94000000 | (((to - frm) >> 2) & 0x3FFFFFF)
++def _emit_stub(here, emit, items):
++    """Assemble a stub whose branches name a label instead of a word count.
++
++    An item is an instruction word, a label (a str, at the instruction after it), or one of
++    ('adrp', rt, target), ('b', target), ('bl', target), ('cbz', rt, label), ('tbz', rt, bit, label)
++    and ('b.gt', label). The branch targets come from the stub's own layout, so inserting an
++    instruction cannot leave one pointing at the wrong place; a stub that names no label is
++    emitted as it stands."""
++    label, n = {}, 0
++    for it in items:
++        if isinstance(it, str): label[it] = n
++        else: n += 1
++    base, idx = here(), 0
++    for it in items:
++        if isinstance(it, str): continue
++        at = base + 4 * idx
++        if isinstance(it, tuple):
++            k = it[0]
++            if k == 'adrp': emit(ADRP(it[1], at, it[2]))
++            elif k == 'b': emit(B(at, it[1]))
++            elif k == 'bl': emit(BL(at, it[1]))
++            elif k == 'cbz': emit(CBZ(it[1], at, base + 4 * label[it[2]]))
++            elif k == 'tbz': emit(TBZ(it[1], it[2], at, base + 4 * label[it[3]]))
++            elif k == 'b.gt': emit(BCOND(12, at, base + 4 * label[it[1]]))
++            else: raise ValueError('stub item ' + k)
++        else: emit(it)
++        idx += 1
+ 
+ 
+ def screen_shape(ctx):
+     here, emit, site, put, STATE = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
+-    for at, words, why in _size_sites:
+-        site(at, struct.pack('<I', words[-1]).hex())
+-        start = here(); emit(ADRP(16, here(), STATE))
+-        for w in words: emit(w)
+-        emit(B(here(), at + 4))
++
++    # view.s must match the generated words. The adapter shares the frame step
++    # state page: no VIEW table, no VIEW_STATE_OFF, no host-managed state.
++    assert hashlib.sha256(Path(__file__).with_name('view.s').read_bytes()).hexdigest() == source_sha256, \
++        'regenerate view stubs after editing view.s'
++    view_base = here()
++    for w in relocated_words(words, relocations, symbols, view_base, STATE):
++        emit(w)
++    for at, ws, why in _size_sites:
++        site(at, struct.pack('<I', ws[-1]).hex())
++        start = here()
++        _emit_stub(here, emit, [('adrp', 16, STATE)] + list(ws) + [('b', at + 4)])
+         put(at, [B(at, start)], why)
+     # Every frame main+0x1527ebc picks the resolution table's mode (3, 1920x1080, in the console mode; 1, 1280x720, handheld) into [main+0x512e2e0] / +0x2e4, divides the
+     # entry by the framebuffer's size ([main+0x59ea928] +0x3a8 / +0x3ac) into the 3D views' render scale (+0x4c8 / +0x4cc), and sets the display buffer's crop
+@@ -90,35 +470,39 @@ def screen_shape(ctx):
+     for at, orig, cvt, back in ((0x1527f00, 0x2d400500, 0x1e380010, 0x1e220201),    # ldp s0, s1, [x8]; fcvtzs w16, s0; scvtf s1, w16
+                                 (0x1527f2c, 0x2d400d02, 0x1e380050, 0x1e220203)):   # ldp s2, s3, [x8]; fcvtzs w16, s2; scvtf s3, w16
+         site(at, struct.pack('<I', orig).hex())
+-        start = here(); emit(orig)   # the original load
+-        emit(ADRP(16, here(), STATE))
+-        for w in (0xb9405611,   # ldr w17, [x16, #0x54]   sites
+-                  0x36380111,   # tbz w17, #7, back (+8)
+-                  0xb9404a11,   # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
+-                  0x340000d1,   # cbz w17, back (+6)
+-                  cvt,          # fcvtzs w16, <width>
+-                  0x1b117e10,   # mul w16, w16, w17
+-                  0x5280f011,   # mov w17, #1920
+-                  0x1ad10a10,   # udiv w16, w16, w17
+-                  back):        # scvtf <height>, w16
+-            emit(w)
+-        emit(B(here(), at + 4))
++        start = here()
++        _emit_stub(here, emit, [
++            orig,                   # the original load
++            ('adrp', 16, STATE),
++            0xb9405611,             # ldr w17, [x16, #0x54]   sites
++            ('tbz', 17, 7, 'back'),
++            0xb9404a11,             # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
++            ('cbz', 17, 'back'),
++            cvt,                    # fcvtzs w16, <width>
++            0x1b117e10,             # mul w16, w16, w17
++            0x5280f011,             # mov w17, #1920
++            0x1ad10a10,             # udiv w16, w16, w17
++            back,                   # scvtf <height>, w16
++            'back',
++            ('b', at + 4)])
+         put(at, [B(at, start)], 'resolution table entry of the frame (crop, render scale): the height of the screen\'s shape (bit 7)')
+     # The layouts' DrawInfo ([+0x60] of the renderer at main+0x31cee50) takes the framebuffer's size twice, 1920.0 x 1080.0 at +0x108 (main+0x31cee58..60) and 1920 x 1080
+     # at +0x138 (main+0x31cee98..9c), which nn::ui2d's scissors and captures map the screen with: both take the output's height. Each stub runs the site's original movk
+     # first. v16 is dead there (a call follows with x0 only), x16 / x17 free. Bit 8 of the sites
+-    for at, orig, words in ((0x31cee60, 0xf2e890f8, (0x1e230230, 0x1e260211, 0xb3607e38)),   # movk x24, #0x4487, lsl #48; ucvtf s16, w17; fmov w17, s16; bfi x24, x17, #32, #32
++    for at, orig, ws in ((0x31cee60, 0xf2e890f8, (0x1e230230, 0x1e260211, 0xb3607e38)),   # movk x24, #0x4487, lsl #48; ucvtf s16, w17; fmov w17, s16; bfi x24, x17, #32, #32
+                             (0x31cee9c, 0xf2c08708, (0xb3607e28,))):                        # movk x8, #0x438, lsl #32; bfi x8, x17, #32, #32
+         site(at, struct.pack('<I', orig).hex())
+-        start = here(); emit(orig)
+-        emit(ADRP(16, here(), STATE))
+-        n = 3 + len(words)   # from the tbz to the branch back (the cbz: n - 2)
+-        emit(0xb9405611)                                          # ldr w17, [x16, #0x54]   sites
+-        emit(0x36400011 | (n << 5))                               # tbz w17, #8, back
+-        emit(0xb9404a11)                                          # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
+-        emit(0x34000011 | ((n - 2) << 5))                         # cbz w17, back
+-        for w in words: emit(w)
+-        emit(B(here(), at + 4))
++        start = here()
++        _emit_stub(here, emit, [
++            orig,
++            ('adrp', 16, STATE),
++            0xb9405611,             # ldr w17, [x16, #0x54]   sites
++            ('tbz', 17, 8, 'back'),
++            0xb9404a11,             # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
++            ('cbz', 17, 'back'),
++            *ws,
++            'back',
++            ('b', at + 4)])
+         put(at, [B(at, start)], 'layouts\' DrawInfo: the framebuffer\'s size in the screen\'s shape (bit 8)')
+     # The scene camera's vertical angle: the field camera (main+0x7a8xxx) keeps it in radians at +0x2cc (0.384, 22 degrees, on the island) and reads it twice, for its
+     # sead::PerspectiveProjection ([+0x80] of the view, main+0x7a895c: fovy +0xa0 and the half angle's sin / cos / tan) and for main+0x151424c (main+0x7a89a8), the views
+@@ -128,38 +512,46 @@ def screen_shape(ctx):
+     # never widens twice. The second site's x0 is main+0x151424c's argument: saved around the calls. Bit 5 of the sites
+     for at in (0x7a895c, 0x7a89a8):
+         site(at, '80ce42bd')
+-        start = here(); emit(0xbd42ce80)   # orig: ldr s0, [x20, #0x2cc]
+-        emit(ADRP(16, here(), STATE))
+-        emit(0xb9405611)   # ldr w17, [x16, #0x54]   sites
+-        emit(0x362801b1)   # tbz w17, #5, back (+13)
+-        emit(0xb9404a11)   # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
+-        emit(0x34000171)   # cbz w17, back (+11)
+-        emit(0xf81f0fe0)   # str x0, [sp, #-16]!
+-        emit(0x1e2c1001)   # fmov s1, #0.5
+-        emit(0x1e210800)   # fmul s0, s0, s1
+-        emit(_bl(here(), _tanf_plt))
+-        emit(ADRP(16, here(), STATE))
+-        emit(0xbd405e01)   # ldr s1, [x16, #0x5c]   k
+-        emit(0x1e210800)   # fmul s0, s0, s1
+-        emit(_bl(here(), _atanf_plt))
+-        emit(0x1e202800)   # fadd s0, s0, s0        the widened angle
+-        emit(0xf84107e0)   # ldr x0, [sp], #16
+-        emit(B(here(), at + 4))
++        start = here()
++        _emit_stub(here, emit, [
++            0xbd42ce80,             # orig: ldr s0, [x20, #0x2cc]
++            ('adrp', 16, STATE),
++            0xb9405611,             # ldr w17, [x16, #0x54]   sites
++            ('tbz', 17, 5, 'back'),
++            0xb9404a11,             # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
++            ('cbz', 17, 'back'),
++            0xf81f0fe0,             # str x0, [sp, #-16]!: the stub tail-branches back into the function,
++                                    # whose own epilogue restores x30, so only the argument is saved
++            0x1e2c1001,             # fmov s1, #0.5
++            0x1e210800,             # fmul s0, s0, s1
++            ('bl', _tanf_plt),
++            ('adrp', 16, STATE),
++            0xbd405e01,             # ldr s1, [x16, #0x5c]   k
++            0x1e210800,             # fmul s0, s0, s1
++            ('bl', _atanf_plt),
++            0x1e202800,             # fadd s0, s0, s0        the widened angle
++            0xf84107e0,             # ldr x0, [sp], #16
++            'back',
++            ('b', at + 4)])
+         put(at, [B(at, start)], 'field camera: its vertical angle widened so the taller screen keeps 16:9\'s sides (bit 5)')
+     code = here()
+     for i in range(0, len(_duo_anchor), 8): emit(int(_duo_anchor[i:i + 8], 16))
+     site(0x27d570, '68624139')
+-    start = here(); emit(ADRP(16, here(), STATE))
+-    emit(0xb9405611)   # ldr w17, [x16, #0x54]   sites
+-    emit(0x36480111)   # tbz w17, #9, orig (+8)
+-    emit(0xb9404a11)   # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
+-    emit(0x340000d1)   # cbz w17, orig (+6)
+-    emit(0xaa1303e0)   # mov x0, x19             the pane
+-    emit(0x91020201)   # add x1, x16, #0x80      the parameters
+-    emit(ADRP(2, here(), _pane_draw_self)); emit(0x91000042 | ((_pane_draw_self & 0xFFF) << 10))   # add x2, x2, #lo12: nn::ui2d::Pane::DrawSelf
+-    emit(_bl(here(), code + _duo_calc))
+-    emit(0x39416268)   # orig: ldrb w8, [x19, #0x58]
+-    emit(B(here(), 0x27d574))
++    start = here()
++    _emit_stub(here, emit, [
++        ('adrp', 16, STATE),
++        0xb9405611,             # ldr w17, [x16, #0x54]   sites
++        ('tbz', 17, 9, 'orig'),
++        0xb9404a11,             # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
++        ('cbz', 17, 'orig'),
++        0xaa1303e0,             # mov x0, x19             the pane
++        0x91020201,             # add x1, x16, #0x80      the parameters
++        ('adrp', 2, _pane_draw_self),
++        0x91000042 | ((_pane_draw_self & 0xFFF) << 10),   # add x2, x2, #lo12: nn::ui2d::Pane::DrawSelf
++        ('bl', code + _duo_calc),
++        'orig',
++        0x39416268,             # orig: ldrb w8, [x19, #0x58]
++        ('b', 0x27d574)])
+     put(0x27d570, [B(0x27d570, start)], 'nn::ui2d::Pane::Calculate after the global matrix: duo_calc (the HUD at the taller screen\'s edges, full-screen backgrounds stretched)')
+     # The field of view: the game camera (main+0x386a6a0, the scene camera's update) copies its sead::PerspectiveProjection ([camera +0x80]: near +0x98, far +0x9c,
+     # fovy +0xa0, its half angle's sin / cos / tan +0xa4..+0xac, aspect +0xb0) into its parameters ([camera +0x1f8] + 0x108), sets near, far and the vertical angle
+@@ -169,21 +561,24 @@ def screen_shape(ctx):
+     # never widens twice, and everything after it (sin / cos / tan, the copy back, the matrix, culling) takes the wider angle. Bit 5 of the sites. Caller-saved
+     # registers are dead there but s0 (the game calls sinf right after)
+     site(0x386a7a0, '0808291e')
+-    start = here(); emit(ADRP(16, here(), STATE))
+-    emit(0xb9404a11)   # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
+-    emit(0x34000171)   # cbz w17, orig (+11)
+-    emit(0xb9405611)   # ldr w17, [x16, #0x54]   sites
+-    emit(0x36280131)   # tbz w17, #5, orig (+9)
+-    emit(0x1e2c1002)   # fmov s2, #0.5
+-    emit(0x1e220800)   # fmul s0, s0, s2
+-    emit(_bl(here(), _tanf_plt))
+-    emit(ADRP(16, here(), STATE))
+-    emit(0xbd405e01)   # ldr s1, [x16, #0x5c]   k
+-    emit(0x1e210800)   # fmul s0, s0, s1
+-    emit(_bl(here(), _atanf_plt))
+-    emit(0x1e202800)   # fadd s0, s0, s0        the widened angle
+-    emit(0x1e290808)   # orig: fmul s8, s0, s9
+-    emit(B(here(), 0x386a7a4))
++    start = here()
++    _emit_stub(here, emit, [
++        ('adrp', 16, STATE),
++        0xb9404a11,             # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
++        ('cbz', 17, 'orig'),
++        0xb9405611,             # ldr w17, [x16, #0x54]   sites
++        ('tbz', 17, 5, 'orig'),
++        0x1e2c1002,             # fmov s2, #0.5
++        0x1e220800,             # fmul s0, s0, s2
++        ('bl', _tanf_plt),
++        ('adrp', 16, STATE),
++        0xbd405e01,             # ldr s1, [x16, #0x5c]   k
++        0x1e210800,             # fmul s0, s0, s1
++        ('bl', _atanf_plt),
++        0x1e202800,             # fadd s0, s0, s0        the widened angle
++        'orig',
++        0x1e290808,             # orig: fmul s8, s0, s9
++        ('b', 0x386a7a4)])
+     put(0x386a7a0, [B(0x386a7a0, start)], 'game camera: the vertical angle widened so the taller screen keeps 16:9\'s sides (bit 5)')
+     # The layouts' projection: nn::ui2d::DrawInfo::SetProjectionMtx (main+0x265100, 13 callers) copies the game's projection of a layout's rectangle (1920x1080 or
+     # 1280x720) into DrawInfo +0x10 (4x4). On the taller screen it would stretch every layout to it; its y row is divided by the vertical stretch (layout height / 720,
+@@ -193,35 +588,66 @@ def screen_shape(ctx):
+     # DrawInfo's projection into another, and the title's layouts came out divided twice (0.65 of their height); another shape (a square render target) is left
+     # alone. Bit 6 of the sites. At the return s0..s4 are free
+     site(0x265140, 'c0035fd6')
+-    start = here(); emit(ADRP(16, here(), STATE))
+-    emit(0xb9404a11)   # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
+-    emit(0x34000511)   # cbz w17, ret (+41)
+-    emit(0xb9405611)   # ldr w17, [x16, #0x54]
+-    emit(0x363004d1)   # tbz w17, #6, ret (+39)
+-    emit(0xbd401001)   # ldr s1, [x0, #0x10]
+-    emit(0x1e20c021)   # fabs s1, s1
+-    emit(0xbd402402)   # ldr s2, [x0, #0x24]
+-    emit(0x1e20c042)   # fabs s2, s2
+-    emit(0x5291c731)   # mov w17, #0x8e39
+-    emit(0x72a7fc71)   # movk w17, #0x3fe3, lsl #16
+-    emit(0x1e270223)   # fmov s3, w17
+-    emit(0x1e230823)   # fmul s3, s1, s3
+-    emit(0x7ea3d443)   # fabd s3, s2, s3
+-    emit(0x529999b1)   # mov w17, #0xcccd
+-    emit(0x72a7a991)   # movk w17, #0x3d4c, lsl #16
+-    emit(0x1e270224)   # fmov s4, w17
+-    emit(0x1e240824)   # fmul s4, s1, s4
+-    emit(0x1e242060)   # fcmp s3, s4
+-    emit(0x540002ec)   # b.gt ret (+23)   not 16:9: as it is
+-    emit(0xbd408600)   # ldr s0, [x16, #0x84]
++    start = here()
++    items = [('adrp', 16, STATE),
++             0xb9404a11,             # ldr w17, [x16, #0x48]   the output's height (0 = 16:9)
++             ('cbz', 17, 'ret'),     # the y row is untouched at 16:9
++             0xb9405611,             # ldr w17, [x16, #0x54]
++             ('tbz', 17, 6, 'ret'),  # bit 6 off
++             0xbd401001,             # ldr s1, [x0, #0x10]
++             0x1e20c021,             # fabs s1, s1
++             0xbd402402,             # ldr s2, [x0, #0x24]
++             0x1e20c042,             # fabs s2, s2
++             0x5291c731,             # mov w17, #0x8e39
++             0x72a7fc71,             # movk w17, #0x3fe3, lsl #16
++             0x1e270223,             # fmov s3, w17
++             0x1e230823,             # fmul s3, s1, s3
++             0x7ea3d443,             # fabd s3, s2, s3
++             0x529999b1,             # mov w17, #0xcccd
++             0x72a7a991,             # movk w17, #0x3d4c, lsl #16
++             0x1e270224,             # fmov s4, w17
++             0x1e240824,             # fmul s4, s1, s4
++             0x1e242060,             # fcmp s3, s4
++             ('b.gt', 'ret'),        # not a 16:9 projection, as it is
++             0xbd408600]             # ldr s0, [x16, #0x84]
+     for i in (1, 4, 5, 6, 7, 9, 13):
+         o = (0x10 + 4 * i) // 4
+-        emit(0xbd400001 | (o << 10))   # ldr s1, [x0, #0x10 + 4 i]
+-        emit(0x1e201821)               # fdiv s1, s1, s0
+-        emit(0xbd000001 | (o << 10))   # str s1, [x0, #0x10 + 4 i]
+-    emit(0xd65f03c0)   # ret
+-    put(0x265140, [B(0x265140, start)], 'nn::ui2d::DrawInfo::SetProjectionMtx: the y row divided by the vertical stretch, layouts in their own shape (bit 6)')
++        items += [0xbd400001 | (o << 10),   # ldr s1, [x0, #0x10 + 4 i]
++                  0x1e201821,               # fdiv s1, s1, s0
++                  0xbd000001 | (o << 10)]   # str s1, [x0, #0x10 + 4 i]
++    # The adapter's keyboard dock follows the upstream y-row division. Its
++    # Lscreen_projection rewrites m0/m5, so the 16:9 test above MUST run first.
++    # x30 is saved with x0: the bl below overwrites it with the return address,
++    # and the ret at the end needs the caller's. Saving x0 alone sent the ret
++    # back to itself, and the stub then walked the stack up a page at a time.
++    items += [STP_PRE(0, 30, 31, -16),                  # save DrawInfo and lr
++              ('adrp', 15, STATE),                      # x15 = state for the adapter
++              ('bl', view_base + symbols['_dm_view_ui_projection']),
++              LDP_POST(0, 30, 31, 16),
++              'ret', 0xd65f03c0]
++    _emit_stub(here, emit, items)
++    put(0x265140, [B(0x265140, start)], 'nn::ui2d::DrawInfo::SetProjectionMtx: y row divided by the stretch, then the keyboard UI dock (bit 6, one chained stub)')
++
+ 
++    # Adapter site assertions, hooks and caches. 0x27d4c0 (Pane::Calculate entry)
++    # and the upstream 0x27d570 (after CalculateGlobalMatrix) coexist.
++    for off, orig in _view_sites:
++        site(off, orig)
++    for off, orig, sym, link in _view_hooks:
++        site(off, orig)
++        put(off, [B(off, view_base + symbols[sym]) | (0x80000000 if link else 0)],
++            'adaptive-view ' + sym)
++    for off, src, dst, orig in _view_caches:
++        site(off, orig)
++        body = here()
++        for w in (STP_PRE(0,30,31,-16), STP_PRE(8,9,31,-16), STP_PRE(15,16,31,-16),
++                  0xaa0003e0 | (src << 16)): emit(w)
++        emit(B(here(), view_base + symbols['_dm_view_cache']) | 0x80000000)
++        emit(STRX(8, 31, 2 if dst == 8 else 3))
++        emit(LDP_POST(15,16,31,16)); emit(LDP_POST(8,9,31,16))
++        emit(LDP_POST(0,30,31,16))
++        emit(B(here(), off + 4))
++        put(off, [B(off, body)], 'refresh cached projection after a view target change')
+ 
+ 
+ FRAME_STEP = {
+@@ -234,4 +660,7 @@ BINDING = [
+     {'what': "screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT)", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+      'why': "the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code",
+      'blocked': 'the stubs have no function-matched form yet'},
++    {'what': "adaptive view: cached projections, scissors, captures, field ranges and UI docking (DM_SCREEN_ASPECT)", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
++     'why': "the state page is the host's, but every adapter site is this build's code",
++     'blocked': 'the stubs have no function-matched form yet'},
+ ]
+diff --git a/dm/games/01006F8002326000/view.LICENSE b/dm/games/01006F8002326000/view.LICENSE
+new file mode 100644
+index 00000000..212315c7
+--- /dev/null
++++ b/dm/games/01006F8002326000/view.LICENSE
+@@ -0,0 +1,5 @@
++MIT No Attribution
++
++Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+diff --git a/dm/games/01006F8002326000/view.s b/dm/games/01006F8002326000/view.s
+new file mode 100644
+index 00000000..a665c75c
+--- /dev/null
++++ b/dm/games/01006F8002326000/view.s
+@@ -0,0 +1,1657 @@
++// Owned adaptive-view routines for ACNH main ff1d1c05670db6021c85b624a710b963.
++// The projection/scissor entry-point lead comes from the MIT-0 ACNH 3.0.X
++// Ultrawide project. Vertical coverage and dynamic cache checks are local.
++// State (the frame step page): +0x58 target aspect (0 = 16:9), +0xa0 layout match,
++// +0xa8/+0xb0/+0xb8 native UI frame stamps. No host-managed pointer is needed.
++.text
++.p2align 2
++.globl _dm_view_matrix
++_dm_view_matrix:
++    ldp s1, s2, [x0, #0xac]
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w15, [x15, #0x58]
++    cbz w15, Lmatrix_done
++    ldr s6, Lbase
++    fcmp s2, s6
++    b.ne Lmatrix_done
++    fmov s7, w15
++    fdiv s6, s6, s7
++    fmov s3, #1.0
++    fmax s6, s6, s3
++    fmul s1, s1, s6
++    fmov s2, s7
++    fmov s3, #0.5
++Lmatrix_done:
++    b _dm_return_037e5978
++
++// A cached projection must follow target changes even when the game has not
++// changed its own camera parameters. The original dirty byte is returned for
++// every other object. No padding or lifetime-sensitive pointers are written.
++.globl _dm_view_cache
++_dm_view_cache:
++    ldrb w8, [x0, #8]
++    cbnz w8, Lcache_return
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w15, [x15, #0x58]
++    cbz w15, Lcache_return
++    stp q0, q1, [sp, #-64]!
++    stp q2, q3, [sp, #32]
++    mrs x15, nzcv
++    str x15, [sp, #-16]!
++    ldr x15, [x0]
++    adrp x16, _dm_code_04a65608@PAGE
++    add x16, x16, _dm_code_04a65608@PAGEOFF
++    cmp x15, x16
++    b.ne Lcache_done
++Lcache_perspective:
++    ldr s0, [x0, #0xb0]
++Lcache_expected:
++    ldr s1, Lbase
++    fcmp s0, s1
++    b.ne Lcache_done
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w15, [x15, #0x58]
++    cbz w15, Lcache_compare
++    fmov s0, w15
++Lcache_compare:
++    ldr s1, [x0, #0xc]
++    ldr s2, [x0, #0x20]
++    fdiv s1, s2, s1
++    fabs s1, s1
++    fsub s1, s1, s0
++    fabs s1, s1
++    ldr s2, Lepsilon
++    fmul s2, s0, s2
++    fcmp s1, s2
++    cset w8, hi
++Lcache_done:
++    ldr x15, [sp], #16
++    msr nzcv, x15
++    ldp q2, q3, [sp, #32]
++    ldp q0, q1, [sp], #64
++Lcache_return:
++    ret
++
++
++// UI jobs can bypass Projection::getMatrix and return a retained override.
++// This getter belongs to the screen UI manager. Recognize its verified 40-degree
++// lens and 1..10000 depth transform, keeping square/local and off-axis captures
++// untouched. Narrow screens preserve X; wide screens preserve Y. Both values
++// are derived from the canonical lens, including restoration to target zero.
++.globl _dm_view_ui_override
++_dm_view_ui_override:
++    add x0, x8, #8
++    stp x8, x30, [sp, #-16]!
++    bl Lscreen_projection
++    ldp x8, x30, [sp], #16
++    ret
++// x0 = screen projection, w8 = accepted. No retained matrix is a scale source.
++Lscreen_projection:
++    mov w8, wzr
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w16, [x15, #0x58]
++    cbz w16, Lui_return
++    ldr w16, [x0, #0x3c]
++    cbnz w16, Lui_return
++    ldr w16, [x0, #0x38]
++    mov w14, #0xbf800000
++    cmp w16, w14
++    b.ne Lui_return
++    ldr w16, [x0, #0x28]
++    ldr w14, Lui_depth_z
++    cmp w16, w14
++    b.ne Lui_return
++    ldr w16, [x0, #0x2c]
++    ldr w14, Lui_depth_w
++    cmp w16, w14
++    b.ne Lui_return
++    ldr w16, [x0, #8]
++    ldr w14, [x0, #0x18]
++    orr w16, w16, w14
++    cbnz w16, Lui_return
++    ldr s0, [x0]
++    ldr s1, [x0, #0x14]
++    ldr s2, Lui_x
++    ldr s3, Lbase
++    ldr s4, Lepsilon
++    fsub s2, s0, s2
++    fabs s2, s2
++    fcmp s2, s4
++    b.ls Lui_apply
++    // A wider initial target retains the canonical vertical coefficient.
++    fcmp s0, #0.0
++    b.le Lui_return
++    ldr s2, Lui_x
++    fcmp s0, s2
++    b.hi Lui_return
++    fmul s2, s2, s3
++    fsub s2, s1, s2
++    fabs s2, s2
++    fcmp s2, s4
++    b.hi Lui_return
++    fdiv s0, s1, s3
++Lui_apply:
++    ldr w16, [x15, #0x58]
++    cbz w16, Lui_original
++    fmov s3, w16
++Lui_original:
++    ldr s0, Lui_x
++    ldr s2, Lbase
++    fdiv s2, s2, s3
++    fmov s4, #1.0
++    fmin s2, s2, s4
++    fmul s0, s0, s2
++    fmul s1, s0, s3
++    str s0, [x0]
++    str s1, [x0, #0x14]
++    mov w8, #1
++Lui_return:
++    ret
++Lui_x: .float 1.5454561710357666
++Lui_depth_z: .float -1.0002000331878662
++Lui_depth_w: .float -2.000200033187866
++
++// Scissor conversion follows the current perspective matrix. Capture-local
++// orthographic projections retain their native coordinates. Preserve NZCV.
++.globl _dm_view_scissor
++_dm_view_scissor:
++    fdiv s3, s0, s2
++    fdiv s2, s1, s4
++    stp x15, x16, [sp, #-16]!
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w15, [x15, #0x58]
++    cbz w15, Lscissor_done
++    ldr w16, [x19, #0x4c]
++    cbnz w16, Lscissor_done
++    stp q5, q6, [sp, #-48]!
++    str q7, [sp, #32]
++    // Match the actual projection to this layout's reference rectangle.
++    ldr s5, [x19, #0x24]
++    ldr s6, [x19, #0x10]
++    fdiv s5, s5, s6
++    fabs s5, s5
++    ldr x15, [x19, #0xc0]
++    ldp s6, s7, [x15, #0x28]
++    fdiv s6, s6, s7
++    fdiv s5, s5, s6
++    // A target narrower than stock extends Y; a wider target extends X.
++    fmov s6, #1.0
++    fmin s6, s6, s5
++    fmul s2, s2, s6
++    fmov s6, #1.0
++    fdiv s5, s6, s5
++    fmin s5, s5, s6
++    fmul s3, s3, s5
++    ldr q7, [sp, #32]
++    ldp q5, q6, [sp], #48
++Lscissor_done:
++    ldp x15, x16, [sp], #16
++    b _dm_return_03a308f0
++
++.globl _dm_view_capture
++_dm_view_capture:
++    fdiv s2, s9, s2
++    stp x15, x16, [sp, #-16]!
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w15, [x15, #0x58]
++    cbz w15, Lcapture_done
++    ldr w16, [x21, #0x4c]
++    cbnz w16, Lcapture_done
++    stp q4, q5, [sp, #-48]!
++    str q6, [sp, #32]
++    ldr s4, [x21, #0x24]
++    ldr s5, [x21, #0x10]
++    fdiv s4, s4, s5
++    fabs s4, s4
++    ldr x15, [x21, #0xc0]
++    ldp s5, s6, [x15, #0x28]
++    fdiv s5, s5, s6
++    fdiv s4, s4, s5
++    fmov s5, #1.0
++    fmin s5, s5, s4
++    fmul s3, s3, s5
++    fmov s5, #1.0
++    fdiv s4, s5, s4
++    fmin s4, s4, s5
++    fmul s2, s2, s4
++    ldr q6, [sp, #32]
++    ldp q4, q5, [sp], #48
++Lcapture_done:
++    ldp x15, x16, [sp], #16
++    b _dm_return_03a2eac0
++
++// Field rectangles select which terrain, trees and items are instantiated.
++// Extend depth as well as width; the margin covers the five-unit cell grid.
++.globl _dm_view_create
++_dm_view_create:
++    str x15, [sp, #-16]!
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w15, [x15, #0x58]
++    cbz w15, Lcreate_done
++    stp q2, q3, [sp, #-32]!
++    fmov s2, w15
++    ldr s1, Lbase
++    fdiv s0, s1, s2
++    fdiv s1, s2, s1
++    fmov s2, #1.0
++    ldr s3, Lmargin
++    fmul s0, s0, s3
++    fmax s0, s0, s2
++    fmul s1, s1, s3
++    fmax s1, s1, s2
++    fmul s8, s8, s0
++    fmul s12, s12, s0
++    fmul s9, s9, s1
++    fmul s13, s13, s1
++    ldr s2, [sp, #0x48]
++    fmul s2, s2, s1
++    str s2, [sp, #0x48]
++    ldp q2, q3, [sp], #32
++Lcreate_done:
++    ldr x15, [sp], #16
++    fsub s0, s10, s9
++    b _dm_return_013a29a8
++
++.globl _dm_view_area
++_dm_view_area:
++    str x15, [sp, #-32]!
++    str q7, [sp, #16]
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w15, [x15, #0x58]
++    cbz w15, Larea_done
++    stp q1, q2, [sp, #-32]!
++    fmov s2, w15
++    ldr s7, Lbase
++    fdiv s0, s7, s2
++    fdiv s1, s2, s7
++    ldr s7, Lmargin
++    fmul s0, s0, s7
++    fmul s1, s1, s7
++    fmov s7, #1.0
++    fmax s0, s0, s7
++    fmax s1, s1, s7
++    fmul s10, s10, s0
++    fmul s11, s11, s0
++    fmul s8, s8, s1
++    fmul s9, s9, s1
++    ldp q1, q2, [sp], #32
++Larea_done:
++    ldr q7, [sp, #16]
++    ldr x15, [sp], #32
++    ldr s0, [x20]
++    ret
++
++.globl _dm_view_units
++_dm_view_units:
++    ldr w8, [x0]
++    str x15, [sp, #-16]!
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w15, [x15, #0x58]
++    cbz w15, Lunits_done
++    lsl w8, w8, #1
++Lunits_done:
++    ldr x15, [sp], #16
++    b _dm_return_01462bb8
++
++
++// Near-plane unprojection follows the adapted matrix without mutating camera parameters.
++.globl _dm_view_near_y
++_dm_view_near_y:
++    ldr s1, [x0, #0xac]
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w15, [x15, #0x58]
++    cbz w15, Lnear_y_done
++    ldr s6, Lbase
++    ldr s7, [x0, #0xb0]
++    fcmp s6, s7
++    b.ne Lnear_y_done
++    fmov s7, w15
++    fdiv s6, s6, s7
++    fmov s16, #1.0
++    fmax s6, s6, s16
++    fmul s1, s1, s6
++Lnear_y_done:
++    b _dm_return_037e5a50
++
++.globl _dm_view_near_xy
++_dm_view_near_xy:
++    ldp s2, s3, [x0, #0xac]
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w15, [x15, #0x58]
++    cbz w15, Lnear_xy_done
++    ldr s6, Lbase
++    fcmp s6, s3
++    b.ne Lnear_xy_done
++    fmov s7, w15
++    fdiv s6, s6, s7
++    fmov s16, #1.0
++    fmax s6, s6, s16
++    fmul s2, s2, s6
++    fmov s3, s7
++Lnear_xy_done:
++    b _dm_return_037e5a80
++
++.globl _dm_view_sphere
++_dm_view_sphere:
++    str x15, [sp, #-16]!
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w15, [x15, #0x58]
++    cbz w15, Lsphere_original
++    fmul s2, s0, s0
++    fmadd s2, s1, s1, s2
++    fmadd s2, s13, s13, s2
++    fsqrt s2, s2
++    fmul s0, s2, s9
++    b Lsphere_done
++Lsphere_original:
++    fcmp s0, s1
++    fcsel s0, s0, s1, gt
++    fcmp s13, s0
++    fcsel s0, s13, s0, gt
++    fmul s0, s0, s9
++Lsphere_done:
++    ldr x15, [sp], #16
++    b _dm_return_013a37c8
++
++.p2align 2
++Lbase: .float 1.7777777777777777778
++Lmin_width: .float 1280.0
++Lmargin: .float 1.1
++Lepsilon: .float 0.00001
++
++// The minimap captures already clip at their own render-target edges. Their
++// extra screen-space ScissorOn pane was authored for a 16:9 projection and
++// trims the captured terrain after changing that projection. Remove only
++// that redundant registration, on two exact whole-resource fingerprints.
++// Resource bytes remain in the game's writable load buffer; disk is untouched.
++.p2align 2
++.globl _dm_view_layout
++_dm_view_layout:
++    stp x9, x10, [sp, #-80]!
++    stp x11, x12, [sp, #16]
++    stp x13, x14, [sp, #32]
++    stp x15, x16, [sp, #48]
++    str x17, [sp, #64]
++    mrs x17, nzcv
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w16, [x15, #0x58]
++    cbz w16, Llayout_done
++    ldr w9, [x21]
++    ldr w10, Lflyt_magic
++    cmp w9, w10
++    b.ne Llayout_done
++    ldr w9, [x21, #0xc]
++    mov w10, #14012
++    cmp w9, w10
++    b.eq Llayout_minimap
++    mov w10, #11108
++    cmp w9, w10
++    b.ne Llayout_done
++    ldr x13, Lcloud_map_hash
++    mov x14, #3292
++    b Llayout_hash
++Llayout_minimap:
++    ldr x13, Lmap_hash
++    mov x14, #2908
++Llayout_hash:
++    mov x10, x21
++    ldr x11, Lfnv_offset
++    ldr x12, Lfnv_prime
++Llayout_byte:
++    ldrb w8, [x10], #1
++    eor x11, x11, x8
++    mul x11, x11, x12
++    sub w9, w9, #1
++    cbnz w9, Llayout_byte
++    cmp x11, x13
++    b.ne Llayout_done
++    str wzr, [x21, x14]
++    mov w16, #1
++    str w16, [x15, #0xa0]
++Llayout_done:
++    msr nzcv, x17
++    ldr x17, [sp, #64]
++    ldp x15, x16, [sp, #48]
++    ldp x13, x14, [sp, #32]
++    ldp x11, x12, [sp, #16]
++    ldp x9, x10, [sp], #80
++    ldrh w8, [x21, #6]
++    b _dm_return_00268ee4
++.p2align 3
++Lmap_hash: .quad 0x1e453d087f41e3bf
++Lcloud_map_hash: .quad 0xb7299d38fd75c925
++Lfnv_offset: .quad 0xcbf29ce484222325
++Lfnv_prime: .quad 0x100000001b3
++Lflyt_magic: .word 0x54594c46
++
++// Mark only actual native UI render jobs. No retained game-object pointers are
++// exposed to the host; old stamps expire after two original presents.
++.p2align 2
++.globl _dm_view_keyboard_frame
++_dm_view_keyboard_frame:
++    stp x15, x16, [sp, #-32]!
++    stp x17, x30, [sp, #16]
++    mov x17, #8                  ; state + 8 = +0xb0, the keyboard frame's stamp
++    bl Ltouch_stamp
++    ldp x17, x30, [sp, #16]
++    ldp x15, x16, [sp], #32
++    sub sp, sp, #0xb0
++    b _dm_return_03268180
++
++.globl _dm_view_touch_page
++_dm_view_touch_page:
++    stp x14, x15, [sp, #-48]!
++    stp x16, x17, [sp, #16]
++    stp x13, x30, [sp, #32]
++    mrs x13, nzcv
++    ldr x14, [x0]
++    adrp x16, _dm_code_049adc80@PAGE
++    add x16, x16, _dm_code_049adc80@PAGEOFF
++    cmp x14, x16
++    b.ne Ltouch_page_done
++    mov x17, #16                 ; state + 16 = +0xb8, the touch panel's stamp
++    bl Ltouch_stamp
++Ltouch_page_done:
++    msr nzcv, x13
++    ldp x13, x30, [sp, #32]
++    ldp x16, x17, [sp, #16]
++    ldp x14, x15, [sp], #48
++    ret
++Ltouch_stamp:
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr x16, [x15, #0xa8]
++    add x15, x15, x17
++    stlr x16, [x15]
++Ltouch_stamp_done:
++    ret
++
++// Only the keyboard docks the whole UI projection. Drawing tools retain
++// their original centred composition; KeyGuide has its own lower-edge anchor.
++// x15 = state, w8 = recently rendered inline keyboard. +0xa8 is the host's
++// present counter (dm_guest_frame, written each present), +0xb0 the keyboard
++// frame's stamp: the keyboard docked when the two are at most two apart.
++Lrecent_keyboard:
++    ldr x16, [x15, #0xa8]
++    mov w8, wzr
++    ldr x17, [x15, #0xb0]
++    cbz x17, Lrecent_done
++    sub x17, x16, x17
++    cmp x17, #2
++    b.hi Lrecent_done
++    mov w8, #1
++Lrecent_done:
++    ret
++
++// DrawInfo owns a fresh copy of the source projection at this boundary. Dock
++// native touch panels to the bottom without moving the 3D camera or accumulating
++// translation in a retained source matrix. Local captures keep their projection.
++.globl _dm_view_ui_projection
++_dm_view_ui_projection:
++    stp x0, x30, [sp, #-16]!
++    add x0, x0, #0x10
++    bl _dm_view_panel_projection
++    ldp x0, x30, [sp], #16
++    ret
++.globl _dm_view_panel_projection
++_dm_view_panel_projection:
++    stp x15, x30, [sp, #-16]!
++    bl Lscreen_projection
++    cbz w8, Lpanel_done
++    ldr s1, Lbase
++    ldr w16, [x15, #0x58]
++    cbz w16, Lpanel_ratio
++    fmov s1, w16
++Lpanel_ratio:
++    ldr s2, Lbase
++    fcmp s1, s2
++    b.ge Lpanel_done
++    bl Lrecent_keyboard
++    cbz w8, Lpanel_done
++    fdiv s1, s1, s2
++    fmov s2, #1.0
++    fsub s1, s2, s1
++    ldr s3, [x0, #0x18]      ; the y row element after the upstream stretch division
++    ldr s4, [x15, #0x84]     ; dm_fps_state +0x84: the vertical stretch (x15, since Lrecent_keyboard leaves x16 holding the counter)
++    fdiv s1, s1, s4          ; normalise the dock offset to the same scale
++    fadd s1, s3, s1          ; option B: additive instead of overwriting index 6
++    str s1, [x0, #0x18]
++; Option A (drop the fdiv line) is the fallback if a device run shows the dock
++; direction is inverted. Both are open until checked on a device.
++Lpanel_done:
++    ldp x15, x30, [sp], #16
++    ret
++
++// Scissor rectangles use the layout's centre rather than the projection's
++// off-axis term. Apply that same bottom-docking translation to their origin.
++.globl _dm_view_scissor_origin
++_dm_view_scissor_origin:
++    ldp s5, s6, [x8, #8]
++    stp x14, x15, [sp, #-32]!
++    stp x16, x17, [sp, #16]
++    stp q0, q7, [sp, #-48]!
++    str q16, [sp, #32]
++    mrs x17, nzcv
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w16, [x15, #0x58]
++    cbz w16, Lscissor_origin_done
++    ldr w16, [x19, #0x4c]
++    cbnz w16, Lscissor_origin_done
++    ldr s7, [x19, #0x10]
++    ldr s16, [x19, #0x24]
++    fdiv s16, s16, s7
++    ldr s7, Lbase
++    fdiv s16, s16, s7
++    fmov s7, #1.0
++    fsub s16, s7, s16
++    ldr s7, [x19, #0x28]
++    fcmp s7, #0.0
++    b.le Lscissor_origin_done
++    fsub s0, s7, s16
++    fabs s0, s0
++    ldr s16, Lepsilon
++    fcmp s0, s16
++    b.hi Lscissor_origin_done
++    fmov s16, #0.5
++    fmul s7, s7, s6
++    fmul s7, s7, s16
++    fsub s2, s2, s7
++Lscissor_origin_done:
++    msr nzcv, x17
++    ldr q16, [sp, #32]
++    ldp q0, q7, [sp], #48
++    ldp x16, x17, [sp, #16]
++    ldp x14, x15, [sp], #32
++    b _dm_return_03a30988
++
++// Background and iris coverage constants are private to this draw; the pane,
++// layout and resource are untouched. Only full-screen centred backgrounds
++// expand their repeating UVs with the quad, retaining the pattern density.
++.globl _dm_view_backdrop_call
++_dm_view_backdrop_call:
++    stp x1, x30, [sp, #-16]!
++    bl _dm_code_00264a10
++    ldr x2, [sp]
++    mov x0, x19
++    mov x1, x20
++    bl _dm_view_backdrop
++    ldr x30, [sp, #8]
++    add sp, sp, #16
++    ret
++.globl _dm_view_backdrop
++_dm_view_backdrop:
++    str x30, [sp, #-16]!
++    mov w3, wzr
++    bl _dm_view_transition
++    ldr x30, [sp], #16
++    cbnz w8, Lbackdrop_done
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w16, [x15, #0x58]
++    cbz w16, Lbackdrop_done
++    ldr w16, [x15, #0x58]
++    cbz w16, Lbackdrop_done
++    // WipeCircle's animated side curtains use reference-screen coverage.
++    // Preserve their aperture edge while extending only the outer coverage.
++    ldr x16, [x0, #0xb0]
++    and x16, x16, #0xfffffeffffffffff
++    ldr x14, Lwipe_left_name
++    cmp x16, x14
++    b.eq Lwipe_side
++    ldr x14, Lwipe_right_name
++    cmp x16, x14
++    b.eq Lwipe_side
++    ldrb w16, [x0, #0x5b]
++    // Full-screen bases can have top/bottom origins; their fresh quad centre
++    // still identifies the same coverage. Keep horizontal off-centre panes out.
++    and w14, w16, #15
++    cmp w14, #8
++    b.hi Lbackdrop_done
++    and w16, w16, #3
++    cbnz w16, Lbackdrop_done
++    ldr w16, [x0, #0xb0]
++    ldr w14, Lbg_name
++    cmp w16, w14
++    b.eq Lbackdrop_size
++    ldr w14, Lbg_lower_name
++    cmp w16, w14
++    b.eq Lbackdrop_size
++    ldr w14, Ldot_name
++    cmp w16, w14
++    b.eq Lbackdrop_size
++    ldr w14, Lcolor_bg_name
++    cmp w16, w14
++    b.eq Lbackdrop_size
++    ldr w14, Lall_bg_name
++    cmp w16, w14
++    b.eq Lbackdrop_size
++    ldr w14, Lstripe_name
++    cmp w16, w14
++    b.eq Lbackdrop_size
++    ldr x16, [x0, #0xb0]
++    ldr x14, Ltexture_bg_name
++    cmp x16, x14
++    b.eq Lbackdrop_texture_suffix
++    ldr x14, Lbase_bg_name
++    cmp x16, x14
++    b.eq Lbackdrop_suffix
++    // Fade and VideogameFade use a separate full-screen picture. Its alpha
++    // animation must cover the same expanded viewport as the scene beneath it.
++    ldr x14, Lfade_bg_name
++    cmp x16, x14
++    b.ne Lbackdrop_done
++Lbackdrop_suffix:
++    ldrh w16, [x0, #0xb8]
++    cmp w16, #0x30
++    b.ne Lbackdrop_done
++    b Lbackdrop_size
++Lbackdrop_texture_suffix:
++    ldrb w16, [x0, #0xb8]
++    cbnz w16, Lbackdrop_done
++Lbackdrop_size:
++    mov w11, wzr
++    ldp s0, s1, [x0, #0x50]
++    fcmp s0, #0.0
++    b.le Lbackdrop_done
++    fcmp s1, #0.0
++    b.le Lbackdrop_done
++    ldr x16, [x1, #0xc0]
++    cbz x16, Lbackdrop_done
++    ldp s2, s3, [x16, #0x28]
++    fcmp s0, s2
++    b.ne Lbackdrop_done
++    fcmp s1, s3
++    b.ne Lbackdrop_done
++    ldr s4, [x2, #0x210]
++    ldr s5, [x2, #0x214]
++    fcmp s4, s0
++    b.ne Lbackdrop_done
++    fcmp s5, s1
++    b.ne Lbackdrop_done
++Lbackdrop_projection:
++    ldr w16, [x1, #0x4c]
++    cbnz w16, Lbackdrop_done
++    ldr s2, [x1, #0x24]
++    ldr s3, [x1, #0x10]
++    fcmp s3, #0.0
++    b.le Lbackdrop_done
++    fdiv s2, s2, s3
++    // Require this draw to use the requested screen projection. Local capture
++    // cameras and an old matrix during a target handoff retain their own quad.
++    ldr s4, [x15, #0x58]
++    fsub s5, s2, s4
++    fabs s5, s5
++    ldr s6, Lepsilon
++    fmul s6, s6, s4
++    fcmp s5, s6
++    b.hi Lbackdrop_done
++    ldr x17, [x1, #0xc0]
++    ldp s3, s4, [x17, #0x28]
++    fdiv s3, s3, s4
++    fdiv s2, s2, s3
++    fcmp s2, #0.0
++    b.le Lbackdrop_done
++    fmov s3, #1.0
++    fcmp s2, s3
++    b.gt Lbackdrop_wide
++    b.ge Lbackdrop_done
++    fdiv s3, s3, s2
++    fmul s4, s1, s3
++    str s4, [x2, #0x214]
++    fmov s5, #0.5
++    fsub s4, s4, s1
++    fmul s4, s4, s5
++    ldr s6, [x1, #0x28]
++    fmul s6, s6, s1
++    fmul s6, s6, s3
++    fmadd s4, s6, s5, s4
++    ldr s5, [x2, #0x21c]
++    fadd s4, s4, s5
++    str s4, [x2, #0x21c]
++    cbnz w11, Lbackdrop_done
++    mov x16, #0xe4
++    mov x9, #16
++    mov x10, #32
++    b Lbackdrop_uv_begin
++Lbackdrop_wide:
++    cbnz w11, Lwipe_wide
++    fmov s3, s2
++    fmul s4, s0, s3
++    str s4, [x2, #0x210]
++    fsub s4, s4, s0
++    fmov s5, #0.5
++    fmul s4, s4, s5
++    ldr s5, [x2, #0x218]
++    fsub s5, s5, s4
++    str s5, [x2, #0x218]
++    mov x16, #0xe0
++    mov x9, #32
++    mov x10, #16
++    b Lbackdrop_uv_begin
++Lwipe_wide:
++    // Add half the newly visible screen width on the outside of each curtain.
++    // The left curtain's right edge and right curtain's left edge stay fixed,
++    // preserving the animated circular aperture and every UV coordinate.
++    ldr s0, [x0, #0x50]
++    ldr s4, [x2, #0x210]
++    fcmp s0, s4
++    b.ne Lbackdrop_done
++    fmov s3, #1.0
++    fsub s2, s2, s3
++    ldr s3, [x17, #0x28]
++    fmul s2, s2, s3
++    fmov s3, #0.5
++    fmul s2, s2, s3
++    fadd s4, s4, s2
++    str s4, [x2, #0x210]
++    ldrb w16, [x0, #0xb2]
++    cmp w16, #0x4c
++    b.ne Lbackdrop_done
++    ldr s4, [x2, #0x218]
++    fsub s4, s4, s2
++    str s4, [x2, #0x218]
++    b Lbackdrop_done
++Lbackdrop_uv_begin:
++    // UV rows use {u,v,0,1}. Keep their midpoint while extending the
++    // repeated picture, so dots and stripes retain their original shape.
++    mov w14, #3
++    mov x13, #0x188
++    ldrb w12, [x0, #0xf1]
++Lbackdrop_uv:
++    // The uniform has three slots, but only active texture-coordinate
++    // indices were populated by the original SDK call.
++    ldrsb w17, [x1, x13]
++    cmp w17, w12
++    b.hs Lbackdrop_next_uv
++    ldr s0, [x2, x16]
++    add x17, x16, x10
++    ldr s1, [x2, x17]
++    fsub s1, s1, s0
++    fmov s2, #0.5
++    fmov s4, s3
++    fmov s5, #1.0
++    fsub s4, s4, s5
++    fmul s4, s4, s2
++    fmul s4, s4, s1
++    fsub s0, s0, s4
++    str s0, [x2, x16]
++    add x17, x16, x9
++    ldr s0, [x2, x17]
++    fsub s0, s0, s4
++    str s0, [x2, x17]
++    add x17, x16, x10
++    ldr s0, [x2, x17]
++    fadd s0, s0, s4
++    str s0, [x2, x17]
++    add x17, x16, #48
++    ldr s0, [x2, x17]
++    fadd s0, s0, s4
++    str s0, [x2, x17]
++Lbackdrop_next_uv:
++    add x13, x13, #1
++    add x16, x16, #64
++    subs w14, w14, #1
++    b.ne Lbackdrop_uv
++Lbackdrop_done:
++    ret
++.p2align 3
++Lwipe_left_name: .asciz "P_L_00"
++    .byte 0
++Lwipe_right_name: .asciz "P_R_00"
++    .byte 0
++Lwipe_circle_name: .ascii "P_Circle"
++Lwipe_inout_name: .ascii "N_InOut_"
++Lwipe_root_name: .ascii "RootPane"
++Lwipe_root_size: .float 1920.0, 1080.0
++Lwipe_inout_size: .float 30.0, 30.0
++.p2align 2
++Lwipe_side:
++    ldr x17, [x0, #0x18]
++    cbz x17, Lbackdrop_done
++    ldr x16, [x17, #0xb0]
++    ldr x14, Lwipe_circle_name
++    cmp x16, x14
++    b.ne Lbackdrop_done
++    // Require a complete matching _00/_01 suffix, including the terminator.
++    ldr w16, [x17, #0xb8]
++    ldrb w13, [x0, #0xb5]
++    lsl w13, w13, #16
++    mov w14, #0x305f
++    orr w14, w14, w13
++    cmp w16, w14
++    b.ne Lbackdrop_done
++    ldr x17, [x17, #0x18]
++    cbz x17, Lbackdrop_done
++    ldr x16, [x17, #0xb0]
++    ldr x14, Lwipe_inout_name
++    cmp x16, x14
++    b.ne Lbackdrop_done
++    ldr w16, [x17, #0xb8]
++    ldrb w13, [x0, #0xb5]
++    lsl w13, w13, #8
++    mov w14, #0x30
++    orr w14, w14, w13
++    cmp w16, w14
++    b.ne Lbackdrop_done
++    ldr x16, [x17, #0x50]
++    ldr x14, Lwipe_inout_size
++    cmp x16, x14
++    b.ne Lbackdrop_done
++    ldr x17, [x17, #0x18]
++    cbz x17, Lbackdrop_done
++    ldr x16, [x17, #0xb0]
++    ldr x14, Lwipe_root_name
++    cmp x16, x14
++    b.ne Lbackdrop_done
++    ldrb w16, [x17, #0xb8]
++    cbnz w16, Lbackdrop_done
++    ldr x16, [x17, #0x50]
++    ldr x14, Lwipe_root_size
++    cmp x16, x14
++    b.ne Lbackdrop_done
++    ldr x17, [x1, #0xc0]
++    cbz x17, Lbackdrop_done
++    ldr x16, [x17, #0x28]
++    cmp x16, x14
++    b.ne Lbackdrop_done
++    ldr s1, [x0, #0x54]
++    ldr s2, [x17, #0x2c]
++    fcmp s1, s2
++    b.ne Lbackdrop_done
++    ldr s2, [x2, #0x214]
++    fcmp s1, s2
++    b.ne Lbackdrop_done
++    // These black coverage panes have no repeated-picture UV expansion.
++    mov w11, #1
++    b Lbackdrop_projection
++Lbg_name: .ascii "P_BG"
++Lbg_lower_name: .ascii "P_Bg"
++Ldot_name: .ascii "P_Do"
++Lcolor_bg_name: .ascii "P_Co"
++Lall_bg_name: .ascii "P_Al"
++Lstripe_name: .ascii "P_St"
++.p2align 3
++Ltexture_bg_name: .ascii "P_Tex_0"
++    .byte 0x30
++Lbase_bg_name: .ascii "P_Base_0"
++Lfade_bg_name: .ascii "P_Fade_0"
++
++// KeyGuide and VideogameKeyGuide share this verified operation-guide hierarchy:
++// RootPane(1920x1080) -> N_InOut_00(30x30) -> N_Align_00(1810x100).
++// Match all three shapes and both complete child names before changing its
++// calculated translation. Original pane coordinates and animations stay intact.
++.p2align 2
++.globl _dm_view_footer_match
++_dm_view_footer_match:
++    mov w8, wzr
++    ldr x14, [x0, #0xb0]
++    ldr x15, Lfooter_inout
++    cmp x14, x15
++    b.ne Lfooter_match_done
++    ldr w14, [x0, #0xb8]
++    mov w15, #0x3030
++    cmp w14, w15
++    b.ne Lfooter_match_done
++    ldr x14, [x0, #0x50]
++    ldr x15, Lfooter_size
++    cmp x14, x15
++    b.ne Lfooter_match_done
++    ldr x17, [x0, #0x18]
++    cbz x17, Lfooter_match_done
++    ldr x14, [x17, #0x50]
++    ldr x15, Lfooter_root_size
++    cmp x14, x15
++    b.ne Lfooter_match_done
++    ldr x17, [x0, #0x28]
++    add x14, x0, #0x20
++    cmp x17, x14
++    b.eq Lfooter_match_done
++    cbz x17, Lfooter_match_done
++    sub x17, x17, #8
++    ldr x14, [x17, #0xb0]
++    ldr x15, Lfooter_align
++    cmp x14, x15
++    b.ne Lfooter_match_done
++    ldr w14, [x17, #0xb8]
++    mov w15, #0x3030
++    cmp w14, w15
++    b.ne Lfooter_match_done
++    ldr x14, [x17, #0x50]
++    ldr x15, Lfooter_align_size
++    cmp x14, x15
++    cset w8, eq
++Lfooter_match_done:
++    ret
++
++// Recalculate this small subtree even when animations are idle, so folding,
++// entering/exiting the inline keyboard and Fit restore the footer immediately.
++.globl _dm_view_footer_recalc
++_dm_view_footer_recalc:
++    stp x8, x30, [sp, #-48]!
++    stp x14, x15, [sp, #16]
++    stp x16, x17, [sp, #32]
++    mrs x16, nzcv
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w17, [x15, #0x58]
++    cbz w17, Lfooter_recalc_done
++    bl _dm_view_footer_match
++    cbz w8, Lfooter_recalc_done
++    orr w3, w3, #1
++Lfooter_recalc_done:
++    msr nzcv, x16
++    ldp x16, x17, [sp, #32]
++    ldp x14, x15, [sp, #16]
++    ldp x8, x30, [sp], #48
++    str d8, [sp, #-0x50]!
++    b _dm_return_0027d4c4
++
++.globl _dm_view_footer_y
++_dm_view_footer_y:
++    stp x8, x30, [sp, #-64]!
++    stp x14, x15, [sp, #16]
++    stp x16, x17, [sp, #32]
++    str x13, [sp, #48]
++    stp q0, q1, [sp, #-32]!
++    mrs x13, nzcv
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w17, [x15, #0x58]
++    cbz w17, Lfooter_y_done
++    bl _dm_view_footer_match
++    cbz w8, Lfooter_y_done
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w16, [x15, #0x58]
++    cbz w16, Lfooter_y_done
++    ldr w16, [x15, #0x58]
++    cbz w16, Lfooter_y_done
++    ldr s0, Lbase
++    fmov s1, w16
++    fcmp s1, s0
++    b.ge Lfooter_y_done
++    bl Lrecent_keyboard
++    cbnz w8, Lfooter_y_done
++    fdiv s0, s0, s1
++    fmov s1, #1.0
++    fsub s0, s0, s1
++    ldr s1, Lfooter_half_height
++    fmsub s3, s0, s1, s3
++Lfooter_y_done:
++    msr nzcv, x13
++    ldp q0, q1, [sp], #32
++    ldr x13, [sp, #48]
++    ldp x16, x17, [sp, #32]
++    ldp x14, x15, [sp, #16]
++    ldp x8, x30, [sp], #64
++    lsr w10, w10, #6
++    b _dm_return_0027d7c0
++.p2align 3
++Lfooter_inout: .ascii "N_InOut_"
++Lfooter_align: .ascii "N_Align_"
++Lfooter_size: .float 30.0, 30.0
++Lfooter_root_size: .float 1920.0, 1080.0
++Lfooter_align_size: .float 1810.0, 100.0
++Lfooter_half_height: .float 540.0
++
++
++// The keyboard owns an embedded dialog, outside ordinary game Page callbacks.
++// Recognize its actually drawn default Window and complete authored hierarchy.
++// The original draw arguments, floating registers and flags are preserved.
++.globl _dm_view_keyboard_window_call
++_dm_view_keyboard_window_call:
++    stp x0, x30, [sp, #-16]!
++    bl _dm_view_keyboard_window
++    ldp x0, x30, [sp], #16
++    ldrb w8, [x0, #0x10a]
++    b _dm_return_0029a18c
++.globl _dm_view_keyboard_window
++_dm_view_keyboard_window:
++    stp x8, x13, [sp, #-64]!
++    stp x14, x15, [sp, #16]
++    stp x16, x17, [sp, #32]
++    stp x0, x30, [sp, #48]
++    mrs x13, nzcv
++    ldr x14, [x0]
++    adrp x15, _dm_code_0474de58@PAGE
++    add x15, x15, _dm_code_0474de58@PAGEOFF
++    cmp x14, x15
++    b.ne Lkeyboard_window_done
++    ldr x14, [x0, #0xb0]
++    ldr x15, Lkeyboard_window_name
++    cmp x14, x15
++    b.ne Lkeyboard_window_done
++    ldr w14, [x0, #0xb8]
++    mov w15, #0x3130
++    cmp w14, w15
++    b.ne Lkeyboard_window_done
++    ldr x14, [x0, #0x50]
++    ldr x15, Lkeyboard_window_size
++    cmp x14, x15
++    b.ne Lkeyboard_window_done
++    ldr x17, [x0, #0x18]
++    cbz x17, Lkeyboard_window_done
++    ldr x14, [x17, #0xb0]
++    ldr x15, Lkeyboard_scale_name
++    cmp x14, x15
++    b.ne Lkeyboard_window_done
++    ldr w14, [x17, #0xb8]
++    mov w15, #0x3130
++    cmp w14, w15
++    b.ne Lkeyboard_window_done
++    ldr x14, [x17, #0x50]
++    ldr x15, Lkeyboard_node_size
++    cmp x14, x15
++    b.ne Lkeyboard_window_done
++    ldr x17, [x17, #0x18]
++    cbz x17, Lkeyboard_window_done
++    ldr x14, [x17, #0xb0]
++    ldr x15, Lkeyboard_valid_name
++    cmp x14, x15
++    b.ne Lkeyboard_window_done
++    ldr w14, [x17, #0xb8]
++    mov w15, #0x3130
++    cmp w14, w15
++    b.ne Lkeyboard_window_done
++    ldr x14, [x17, #0x50]
++    ldr x15, Lkeyboard_node_size
++    cmp x14, x15
++    b.ne Lkeyboard_window_done
++    ldr x17, [x17, #0x18]
++    cbz x17, Lkeyboard_window_done
++    ldr x14, [x17, #0xb0]
++    ldr x15, Lkeyboard_part_name
++    cmp x14, x15
++    b.eq Lkeyboard_single_button
++    ldr x15, Lkeyboard_part_pair_name
++    cmp x14, x15
++    b.ne Lkeyboard_window_done
++    ldrb w14, [x17, #0xb8]
++    cbnz w14, Lkeyboard_window_done
++    ldr x17, [x17, #0x18]
++    cbz x17, Lkeyboard_window_done
++    b Lkeyboard_button_loop
++Lkeyboard_single_button:
++    ldrb w14, [x17, #0xb8]
++    cbnz w14, Lkeyboard_window_done
++    ldr x17, [x17, #0x18]
++    cbz x17, Lkeyboard_window_done
++    ldr x14, [x17, #0xb0]
++    ldr x15, Lkeyboard_root_name
++    cmp x14, x15
++    b.eq Lkeyboard_button_root
++Lkeyboard_button_loop:
++    ldr x14, [x17, #0xb0]
++    ldr x15, Lkeyboard_loop_name
++    cmp x14, x15
++    b.ne Lkeyboard_window_done
++    ldr w14, [x17, #0xb8]
++    mov w15, #0x30
++    cmp w14, w15
++    b.ne Lkeyboard_window_done
++    ldr x14, [x17, #0x50]
++    ldr x15, Lkeyboard_loop_size
++    cmp x14, x15
++    b.ne Lkeyboard_window_done
++    ldr x17, [x17, #0x18]
++    cbz x17, Lkeyboard_window_done
++    ldr x14, [x17, #0xb0]
++    ldr x15, Lkeyboard_root_name
++    cmp x14, x15
++    b.ne Lkeyboard_window_done
++Lkeyboard_button_root:
++    ldr x14, [x17, #0x50]
++    ldr x15, Lkeyboard_root_size
++    cmp x14, x15
++    b.ne Lkeyboard_window_done
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr x16, [x15, #0xa8]
++    add x15, x15, #56           ; +0x38: the keyboard dialog's own stamp, which this host does not read (AnimalDuo's touch-context bit 3 was not ported)
++    stlr x16, [x15]
++Lkeyboard_window_done:
++    msr nzcv, x13
++    ldp x0, x30, [sp, #48]
++    ldp x16, x17, [sp, #32]
++    ldp x14, x15, [sp, #16]
++    ldp x8, x13, [sp], #64
++    ret
++.p2align 3
++Lkeyboard_window_name: .ascii "W_BaseL_"
++Lkeyboard_scale_name: .ascii "N_Scale_"
++Lkeyboard_valid_name: .ascii "N_Valid_"
++Lkeyboard_part_name: .ascii "L_Btn_00"
++Lkeyboard_part_pair_name: .ascii "L_Btn_01"
++Lkeyboard_loop_name: .ascii "N_Loop_0"
++Lkeyboard_root_name: .asciz "N_Root"
++    .byte 0
++Lkeyboard_window_size: .float 420,120
++Lkeyboard_node_size: .float 30,40
++Lkeyboard_root_size: .float 10,108
++Lkeyboard_loop_size: .float 30,30
++
++// Transition layouts are screen overlays. Extend only their outer coverage;
++// retain the authored inner edges, animation, colours, alpha and texture UVs.
++// Layout::Build stores its lyt1 name pointer at +0x30 (verified in the profile).
++// The regular and colour-optimized Picture paths use different quad encodings.
++.globl _dm_view_transition_fast_call
++_dm_view_transition_fast_call:
++    stp x1, x30, [sp, #-16]!
++    bl _dm_code_00265220
++    ldr x2, [sp]
++    sub x2, x2, #0x40
++    mov x0, x19
++    mov x1, x20
++    mov w3, #1
++    bl _dm_view_transition
++    ldp x1, x30, [sp], #16
++    ret
++
++// x0 pane, x1 DrawInfo, x2 private draw constants, w3 optimized-quad encoding.
++// Return 1 for a transition layout, including refused local/malformed draws,
++// so the older repeating-background adapter cannot process it a second time.
++.globl _dm_view_transition
++_dm_view_transition:
++    adrp x15, _dm_view_state@PAGE
++    add x15, x15, _dm_view_state@PAGEOFF
++    ldr w14, [x15, #0x58]
++    cbz w14, Ltransition_no
++    ldr w14, [x15, #0x58]
++    cbz w14, Ltransition_no
++    fmov s0, w14
++    ldr s1, Lbase
++    fcmp s0, s1
++    b.eq Ltransition_no
++    ldr x16, [x1, #0xc0]
++    cbz x16, Ltransition_no
++    ldr x17, [x16, #0x30]
++    cbz x17, Ltransition_no
++    ldr w14, [x17]
++    ldr w13, Ltransition_wipe
++    cmp w14, w13
++    b.eq Ltransition_layout
++    ldr w13, Ltransition_fade
++    cmp w14, w13
++    b.ne Ltransition_video
++    ldrb w14, [x17, #4]
++    cbz w14, Ltransition_layout
++    b Ltransition_no
++Ltransition_video:
++    ldr x14, [x17]
++    ldr x13, Ltransition_video_name
++    cmp x14, x13
++    b.ne Ltransition_time
++    ldr w14, [x17, #8]
++    ldr w13, Ltransition_video_tail
++    cmp w14, w13
++    b.ne Ltransition_no
++    ldrh w14, [x17, #12]
++    cmp w14, #0x65
++    b.eq Ltransition_layout
++    b Ltransition_no
++Ltransition_time:
++    ldr x13, Ltransition_time_name
++    cmp x14, x13
++    b.ne Ltransition_cloud
++    ldr w14, [x17, #8]
++    ldr w13, Ltransition_time_tail
++    cmp w14, w13
++    b.ne Ltransition_no
++    ldrh w14, [x17, #12]
++    cmp w14, #0x74
++    b.eq Ltransition_layout
++    b Ltransition_no
++Ltransition_cloud:
++    ldr x13, Ltransition_cloud_name
++    cmp x14, x13
++    b.ne Ltransition_no
++    ldr x14, [x17, #8]
++    ldr x13, Ltransition_cloud_middle
++    cmp x14, x13
++    b.ne Ltransition_no
++    ldr w14, [x17, #16]
++    ldr w13, Ltransition_cloud_tail
++    cmp w14, w13
++    b.ne Ltransition_no
++    ldrb w14, [x17, #20]
++    cbnz w14, Ltransition_no
++Ltransition_layout:
++    ldr x14, [x16, #0x28]
++    ldr x13, Ltransition_reference_size
++    cmp x14, x13
++    b.ne Ltransition_done
++    ldr x10, [x0, #0xb0]
++    adr x9, Ltransition_roles
++    mov w11, #18
++Ltransition_role:
++    ldp x12, x13, [x9], #16
++    and x14, x10, x13
++    cmp x14, x12
++    b.eq Ltransition_projection
++    sub w11, w11, #1
++    cbnz w11, Ltransition_role
++    b Ltransition_done
++Ltransition_projection:
++    // The viewport must be the current screen perspective, not a capture.
++    ldr w14, [x1, #0x4c]
++    cbnz w14, Ltransition_done
++    ldr w14, [x1, #0x48]
++    mov w13, #0xbf800000
++    cmp w14, w13
++    b.ne Ltransition_done
++    ldr x14, [x1, #0x40]
++    and x14, x14, #0x7fffffff7fffffff
++    cbnz x14, Ltransition_done
++    ldr s0, [x1, #0x10]
++    ldr s1, [x1, #0x24]
++    fcmp s0, #0.0
++    b.le Ltransition_done
++    fcmp s1, #0.0
++    b.le Ltransition_done
++    fdiv s2, s1, s0
++    ldr s3, [x15, #0x58]
++    fsub s2, s2, s3
++    fabs s2, s2
++    ldr s30, Lepsilon
++    fmul s3, s3, s30
++    fcmp s2, s3
++    b.hi Ltransition_done
++    // Both matrices must be fresh. Reusing already expanded model constants
++    // must be idempotent even if one material is submitted twice.
++    mov x11, #0
++Ltransition_projection_fresh:
++    ldr x12, [x2, x11]
++    add x10, x1, #0x10
++    ldr x13, [x10, x11]
++    cmp x12, x13
++    b.ne Ltransition_done
++    add x11, x11, #8
++    cmp x11, #64
++    b.ne Ltransition_projection_fresh
++    mov x11, #0
++    add x9, x2, #0x40
++    add x10, x1, #0x80
++Ltransition_model_fresh:
++    ldr x12, [x9, x11]
++    ldr x13, [x10, x11]
++    cmp x12, x13
++    b.ne Ltransition_done
++    add x11, x11, #8
++    cmp x11, #48
++    b.ne Ltransition_model_fresh
++    // Only an axis-aligned flat UI plane has separable screen outer edges.
++    ldr s2, [x2, #0x44]
++    fcmp s2, #0.0
++    b.ne Ltransition_done
++    ldr s2, [x2, #0x50]
++    fcmp s2, #0.0
++    b.ne Ltransition_done
++    ldr s2, [x2, #0x60]
++    fcmp s2, #0.0
++    b.ne Ltransition_done
++    ldr s2, [x2, #0x64]
++    fcmp s2, #0.0
++    b.ne Ltransition_done
++    ldr s4, [x2, #0x40]
++    ldr s5, [x2, #0x54]
++    ldr s6, [x2, #0x4c]
++    ldr s7, [x2, #0x5c]
++    ldr s29, [x2, #0x6c]
++    fcmp s4, #0.0
++    b.eq Ltransition_done
++    fcmp s5, #0.0
++    b.eq Ltransition_done
++    fcmp s29, #0.0
++    b.ge Ltransition_done
++    fneg s29, s29
++    fdiv s26, s29, s0
++    fdiv s27, s29, s1
++    ldp s24, s25, [x16, #0x28]
++    fmov s31, #0.5
++    fmul s24, s24, s31
++    fmul s25, s25, s31
++    // Convert the current projected viewport into the same world UI units.
++    ldr s28, [x1, #0x18]
++    fmul s28, s28, s26
++    ldr s29, [x1, #0x28]
++    fmul s29, s29, s27
++    // Clamp only negative extra coverage to zero: a smaller/capture viewport
++    // cannot shrink authored coverage or change an existing aperture edge.
++    fsub s20, s26, s28
++    fsub s20, s20, s24
++    fadd s21, s26, s28
++    fsub s21, s21, s24
++    fsub s22, s27, s29
++    fsub s22, s22, s25
++    fadd s23, s27, s29
++    fsub s23, s23, s25
++    fmov s31, wzr
++    fmax s20, s20, s31
++    fmax s21, s21, s31
++    fmax s22, s22, s31
++    fmax s23, s23, s31
++    // Accept only the original complete quad encoding for this Picture path.
++    ldp s0, s1, [x0, #0x50]
++    ldr s2, [x2, #0x218]
++    ldr s3, [x2, #0x21c]
++    // Encoding mode lives in w3, whose floating register is independent.
++    cbnz w3, Ltransition_fast_origin
++    ldr s28, [x2, #0x210]
++    ldr s29, [x2, #0x214]
++    fcmp s28, s0
++    b.ne Ltransition_done
++    fcmp s29, s1
++    b.ne Ltransition_done
++    b Ltransition_bounds
++Ltransition_fast_origin:
++    ldr s28, [x2, #0x210]
++    ldr s29, [x2, #0x214]
++    fmov s31, #0.5
++    fmul s30, s0, s31
++    fcmp s28, s30
++    b.ne Ltransition_done
++    fmul s30, s1, s31
++    fcmp s29, s30
++    b.ne Ltransition_done
++    fcmp s2, #0.0
++    b.ne Ltransition_done
++    fcmp s3, #0.0
++    b.ne Ltransition_done
++    ldrb w14, [x0, #0x5b]
++    and w13, w14, #3
++    cmp w13, #3
++    b.eq Ltransition_done
++    fmov s2, wzr
++    cbnz w13, Ltransition_fast_x_edge
++    fmul s2, s0, s31
++    fneg s2, s2
++    b Ltransition_fast_y
++Ltransition_fast_x_edge:
++    cmp w13, #2
++    b.ne Ltransition_fast_y
++    fneg s2, s0
++Ltransition_fast_y:
++    ubfx w13, w14, #2, #2
++    cmp w13, #3
++    b.eq Ltransition_done
++    fmov s3, wzr
++    cbnz w13, Ltransition_fast_y_edge
++    fmul s3, s1, s31
++    b Ltransition_bounds
++Ltransition_fast_y_edge:
++    cmp w13, #2
++    b.ne Ltransition_bounds
++    fmov s3, s1
++Ltransition_bounds:
++    fmadd s16, s4, s2, s6
++    fadd s0, s2, s0
++    fmadd s17, s4, s0, s6
++    fmin s28, s16, s17
++    fmax s17, s16, s17
++    fmov s16, s28
++    fmadd s18, s5, s3, s7
++    fsub s1, s3, s1
++    fmadd s19, s5, s1, s7
++    fmin s28, s18, s19
++    fmax s19, s18, s19
++    fmov s18, s28
++    // All decisions use finite bounds, including negative pane dimensions and
++    // reflected animation scales. Decorative aperture pictures are excluded.
++    ldr s31, Ltransition_infinity
++    fabs s28, s16
++    fcmp s28, s31
++    b.hs Ltransition_done
++    fabs s28, s17
++    fcmp s28, s31
++    b.hs Ltransition_done
++    fabs s28, s18
++    fcmp s28, s31
++    b.hs Ltransition_done
++    fabs s28, s19
++    fcmp s28, s31
++    b.hs Ltransition_done
++    fadd s28, s20, s21
++    fadd s29, s22, s23
++    fadd s28, s28, s29
++    fcmp s28, s31
++    b.hs Ltransition_done
++    ldr s30, Lepsilon
++    fmul s28, s24, s30
++    fmul s29, s25, s30
++    fneg s30, s24
++    fadd s30, s30, s28
++    fcmp s16, s30
++    b.gt Ltransition_keep_left
++    fsub s20, s16, s20
++    b Ltransition_right
++Ltransition_keep_left:
++    fmov s20, s16
++Ltransition_right:
++    fsub s30, s24, s28
++    fcmp s17, s30
++    b.lt Ltransition_keep_right
++    fadd s21, s17, s21
++    b Ltransition_bottom
++Ltransition_keep_right:
++    fmov s21, s17
++Ltransition_bottom:
++    fneg s30, s25
++    fadd s30, s30, s29
++    fcmp s18, s30
++    b.gt Ltransition_keep_bottom
++    fsub s22, s18, s22
++    b Ltransition_top
++Ltransition_keep_bottom:
++    fmov s22, s18
++Ltransition_top:
++    fsub s30, s25, s29
++    fcmp s19, s30
++    b.lt Ltransition_keep_top
++    fadd s23, s19, s23
++    b Ltransition_commit
++Ltransition_keep_top:
++    fmov s23, s19
++Ltransition_commit:
++    fcmp s20, s16
++    b.ne Ltransition_changed
++    fcmp s21, s17
++    b.ne Ltransition_changed
++    fcmp s22, s18
++    b.ne Ltransition_changed
++    fcmp s23, s19
++    b.eq Ltransition_done
++Ltransition_changed:
++    cbnz w3, Ltransition_commit_fast
++    // Invert the original axes while retaining the signed vertex order.
++    ldr s0, [x0, #0x50]
++    fmul s0, s0, s4
++    fmov w17, s0
++    tbnz w17, #31, Ltransition_regular_x_reverse
++    fmov s0, s20
++    fsub s1, s21, s20
++    b Ltransition_regular_x
++Ltransition_regular_x_reverse:
++    fmov s0, s21
++    fsub s1, s20, s21
++Ltransition_regular_x:
++    fsub s0, s0, s6
++    fdiv s0, s0, s4
++    fdiv s1, s1, s4
++    ldr s2, [x0, #0x54]
++    fmul s2, s2, s5
++    fmov w17, s2
++    tbnz w17, #31, Ltransition_regular_y_reverse
++    fmov s2, s23
++    fsub s3, s23, s22
++    b Ltransition_regular_y
++Ltransition_regular_y_reverse:
++    fmov s2, s22
++    fsub s3, s22, s23
++Ltransition_regular_y:
++    fsub s2, s2, s7
++    fdiv s2, s2, s5
++    fdiv s3, s3, s5
++    fabs s28, s0
++    fcmp s28, s31
++    b.hs Ltransition_done
++    fabs s28, s1
++    fcmp s28, s31
++    b.hs Ltransition_done
++    fabs s28, s2
++    fcmp s28, s31
++    b.hs Ltransition_done
++    fabs s28, s3
++    fcmp s28, s31
++    b.hs Ltransition_done
++    str s1, [x2, #0x210]
++    str s3, [x2, #0x214]
++    str s0, [x2, #0x218]
++    str s2, [x2, #0x21c]
++    b Ltransition_done
++Ltransition_commit_fast:
++    fsub s0, s17, s16
++    fsub s1, s19, s18
++    fcmp s0, #0.0
++    b.le Ltransition_commit_fast_zero
++    fcmp s1, #0.0
++    b.le Ltransition_commit_fast_zero
++    fsub s2, s21, s20
++    fsub s3, s23, s22
++    fdiv s2, s2, s0
++    fdiv s3, s3, s1
++    fsub s0, s6, s16
++    fsub s1, s7, s18
++    fmadd s0, s0, s2, s20
++    fmadd s1, s1, s3, s22
++    fmul s4, s4, s2
++    fmul s5, s5, s3
++    fabs s28, s4
++    fcmp s28, s31
++    b.hs Ltransition_done
++    fabs s28, s5
++    fcmp s28, s31
++    b.hs Ltransition_done
++    fabs s28, s0
++    fcmp s28, s31
++    b.hs Ltransition_done
++    fabs s28, s1
++    fcmp s28, s31
++    b.hs Ltransition_done
++    str s4, [x2, #0x40]
++    str s5, [x2, #0x54]
++    str s0, [x2, #0x4c]
++    str s1, [x2, #0x5c]
++    b Ltransition_done
++Ltransition_commit_fast_zero:
++    // A curtain can begin at zero width/height outside the reference screen.
++    // Give its new outer strip real geometry without moving its aperture edge.
++    fsub s0, s21, s20
++    fsub s1, s23, s22
++    fabs s2, s4
++    fabs s3, s5
++    fdiv s0, s0, s2
++    fdiv s1, s1, s3
++    fmov s28, #0.5
++    fmul s0, s0, s28
++    fmul s1, s1, s28
++    ldr w17, [x0, #0x50]
++    tbz w17, #31, Ltransition_zero_width_sign
++    fneg s0, s0
++Ltransition_zero_width_sign:
++    ldr w17, [x0, #0x54]
++    tbz w17, #31, Ltransition_zero_height_sign
++    fneg s1, s1
++Ltransition_zero_height_sign:
++    fadd s2, s20, s21
++    fadd s3, s22, s23
++    fmul s2, s2, s28
++    fmul s3, s3, s28
++    ldrb w14, [x0, #0x5b]
++    and w13, w14, #3
++    cbz w13, Ltransition_zero_y_origin
++    fmov s29, s0
++    cmp w13, #2
++    b.ne Ltransition_zero_x_origin
++    fneg s29, s29
++Ltransition_zero_x_origin:
++    fmul s29, s4, s29
++    fsub s2, s2, s29
++Ltransition_zero_y_origin:
++    ubfx w13, w14, #2, #2
++    cbz w13, Ltransition_zero_finite
++    fneg s29, s1
++    cmp w13, #2
++    b.ne Ltransition_zero_y_shift
++    fneg s29, s29
++Ltransition_zero_y_shift:
++    fmul s29, s5, s29
++    fsub s3, s3, s29
++Ltransition_zero_finite:
++    fabs s28, s0
++    fcmp s28, s31
++    b.hs Ltransition_done
++    fabs s28, s1
++    fcmp s28, s31
++    b.hs Ltransition_done
++    fabs s28, s2
++    fcmp s28, s31
++    b.hs Ltransition_done
++    fabs s28, s3
++    fcmp s28, s31
++    b.hs Ltransition_done
++    str s0, [x2, #0x210]
++    str s1, [x2, #0x214]
++    str s2, [x2, #0x4c]
++    str s3, [x2, #0x5c]
++Ltransition_done:
++    mov w8, #1
++    ret
++Ltransition_no:
++    mov w8, wzr
++    ret
++.p2align 3
++Ltransition_wipe: .ascii "Wipe"
++Ltransition_fade: .ascii "Fade"
++Ltransition_video_name: .ascii "Videogam"
++Ltransition_video_tail: .ascii "eFad"
++Ltransition_time_name: .ascii "LWipeTim"
++Ltransition_time_tail: .ascii "eEdi"
++Ltransition_cloud_name: .ascii "CloudIsl"
++Ltransition_cloud_middle: .ascii "andWipeD"
++Ltransition_cloud_tail: .ascii "ream"
++Ltransition_reference_size: .float 1920,1080
++Ltransition_infinity: .word 0x7f800000
++.p2align 3
++Ltransition_roles:
++    .quad 0x005f657361425f50, 0x00ffffffffffffff
++    .quad 0x005f6b6361425f50, 0x00ffffffffffffff
++    .quad 0x005f656461465f50, 0x00ffffffffffffff
++    .quad 0x0000005f67425f50, 0x000000ffffffffff
++    .quad 0x0000005f47425f50, 0x000000ffffffffff
++    .quad 0x0000657069575f50, 0x0000ffffffffffff
++    .quad 0x00000074754f5f50, 0x000000ffffffffff
++    .quad 0x0000005f70555f50, 0x000000ffffffffff
++    .quad 0x005f6e776f445f50, 0x00ffffffffffffff
++    .quad 0x7265747461505f50, 0xffffffffffffffff
++    .quad 0x000000005f4c5f50, 0x00000000ffffffff
++    .quad 0x000000005f525f50, 0x00000000ffffffff
++    .quad 0x000000005f545f50, 0x00000000ffffffff
++    .quad 0x000000005f425f50, 0x00000000ffffffff
++    .quad 0x616d726f4e4c5f50, 0xffffffffffffffff
++    .quad 0x616d726f4e525f50, 0xffffffffffffffff
++    .quad 0x616d726f4e545f50, 0xffffffffffffffff
++    .quad 0x616d726f4e425f50, 0xffffffffffffffff
+diff --git a/dm/host/hle_os.c b/dm/host/hle_os.c
+index be8a72c8..c89cbefe 100644
+--- a/dm/host/hle_os.c
++++ b/dm/host/hle_os.c
+@@ -68,7 +68,12 @@ uint64_t guest_ticks(void) { return dm_sdk_ounce() ? guest_ns() / 32 : guest_ns(
+ int dm_detclock_enabled(void) { return detclock_cfg() && atomic_load(&g_gdet_on); }
+ void dm_guest_frame_tick(void) {
+     crash_watch_frame();
+-    atomic_fetch_add(&g_guest_frame, 1);
++    uint64_t f = atomic_fetch_add(&g_guest_frame, 1) + 1;
++    // The frame stamps of a profile's adaptive-view adapter (Animal Crossing's view.s): the adapter keeps +0xa8 as this present
++    // counter and writes a stamp into +0xb0 / +0xb8 where the game draws the keyboard or a touch panel, so "the keyboard was
++    // rendered within the last two presents" is a subtraction. The slot is past every field the frame step stubs read (+0x9c and
++    // below), so a profile without an adapter only sees a value nothing reads; the write is one relaxed store per present.
++    if (dm_fps_state) __atomic_store_n((uint64_t *)(dm_fps_state + 0xa8), f, __ATOMIC_RELAXED);
+     if (!detclock_cfg()) return;
+     if (!atomic_load(&g_gdet_on)) {
+         atomic_store(&g_gdet, wall_guest_ns()); atomic_store(&g_gdet_on, 1);
+diff --git a/dm/tools/nso_asm.py b/dm/tools/nso_asm.py
+index 23e6f456..cc8b7344 100644
+--- a/dm/tools/nso_asm.py
++++ b/dm/tools/nso_asm.py
+@@ -7,6 +7,12 @@ def BL(frm, to): return B(frm, to) | 0x80000000
+ def CBNZW(t, frm, to):   # cbnz wt, to
+     off = to - frm; assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
+     return 0x35000000 | (((off >> 2) & 0x7FFFF) << 5) | t
++def CBZ(t, frm, to):   # cbz wt, to
++    off = to - frm; assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
++    return 0x34000000 | (((off >> 2) & 0x7FFFF) << 5) | t
++def TBZ(t, bit, frm, to):   # tbz wt, #bit, to
++    off = to - frm; assert -(1 << 15) <= off < (1 << 15) and off % 4 == 0
++    return 0x36000000 | ((bit & 31) << 19) | (((off >> 2) & 0x3FFF) << 5) | t
+ def STP(t, t2, n, off): return 0xA9000000 | (((off // 8) & 0x7F) << 15) | (t2 << 10) | (n << 5) | t
+ def LDP(t, t2, n, off): return 0xA9400000 | (((off // 8) & 0x7F) << 15) | (t2 << 10) | (n << 5) | t
+ def STP_PRE(t, t2, n, off): return 0xA9800000 | (((off // 8) & 0x7F) << 15) | (t2 << 10) | (n << 5) | t
+@@ -28,6 +34,9 @@ def CMPR(n, m): return 0xEB00001F | (m << 16) | (n << 5)   # cmp xn, xm (subs xz
+ def BEQ(frm, to):
+     off = to - frm; assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
+     return 0x54000000 | (((off >> 2) & 0x7FFFF) << 5)
++def BCOND(cond, frm, to):   # b.<cond> to: 0 EQ, 1 NE, 12 GT, 13 LE, ...
++    off = to - frm; assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
++    return 0x54000000 | (cond & 15) | (((off >> 2) & 0x7FFFF) << 5)
+ def BRK(imm): return 0xD4200000 | ((imm & 0xFFFF) << 5)
+ def BLR(n): return 0xD63F0000 | (n << 5)
+ NOP = 0xD503201F
+diff --git a/dm/tools/tests/test_view_stubs.py b/dm/tools/tests/test_view_stubs.py
+new file mode 100644
+index 00000000..594b35c5
+--- /dev/null
++++ b/dm/tools/tests/test_view_stubs.py
+@@ -0,0 +1,233 @@
++"""Owned camera code generation and symbolic relocation, without game data."""
++import hashlib
++import importlib.util
++from pathlib import Path
++import shutil
++import sys
++import unittest
++from types import SimpleNamespace
++
++TOOLS=Path(__file__).resolve().parents[1]
++sys.path.insert(0,str(TOOLS))
++sys.path.insert(0,str(TOOLS))  # nso_asm
++import importlib.util
++PROFILE = TOOLS.parent/'games/01006F8002326000'
++def _load(name):
++    spec=importlib.util.spec_from_file_location(name, PROFILE/name)
++    m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
++from nso_asm import ADDI,ADRP,B
++gen=_load('gen_view_stubs.py'); assemble=gen.assemble
++patches=_load('patches.py'); relocated_words=patches.relocated_words
++
++class Relocations(unittest.TestCase):
++    def test_mixed_symbols_and_link_bit(self):
++        words=[0x94000000,0x9000000f,0x910001ef,0x14000000]
++        reloc=[(0,2,'_dm_return_00009000'),(4,3,'_dm_view_state'),(8,4,'_dm_view_state'),(12,2,'local')]
++        got=relocated_words(words,reloc,{'local':64},0x10000,0x2ffe0)
++        self.assertEqual(got,[B(0x10000,0x9000)|0x80000000,ADRP(15,0x10004,0x2ffe0),ADDI(15,15,0xfe0),B(0x1000c,0x10040)])
++        self.assertEqual(words,[0x94000000,0x9000000f,0x910001ef,0x14000000])
++        self.assertEqual(relocated_words([0x14000000],[(0,2,'_dm_code_00100000')],{},0xff000,0),[B(0xff000,0x100000)])
++
++    def test_reject_invalid_instruction_range_or_symbol(self):
++        for words,reloc in [([0],[(0,2,'local')]),([0],[(0,3,'local')]),([0],[(0,4,'local')]),([0x14000000],[(2,2,'local')]),([0x14000000],[(4,2,'local')]),([0x14000000],[(-4,2,'local')])]:
++            with self.subTest(reloc=reloc,words=words),self.assertRaises(AssertionError):relocated_words(words,reloc,{'local':0},0,0)
++        with self.assertRaises(ValueError):relocated_words([0],[(0,9,'local')],{'local':0},0,0)
++        with self.assertRaises(ValueError):relocated_words([0],[(0,2,'missing')],{},0,0)
++        with self.assertRaises(AssertionError):relocated_words([0x14000000],[(0,2,'_dm_code_10000000')],{},0,0)
++        with self.assertRaises(AssertionError):relocated_words([0x90000000],[(0,3,'_dm_view_state')],{},0,1<<40)
++
++    @unittest.skipUnless(sys.platform=='darwin' and shutil.which('clang'),'Apple ARM64 assembler required')
++    def test_generated_profile_matches_owned_source(self):
++        source=PROFILE/'view.s';profile=source.with_name('patches.py')
++        spec=importlib.util.spec_from_file_location('test_owned_view',profile)
++        assert spec is not None and spec.loader is not None
++        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
++        words,symbols,relocations=assemble(source)
++        self.assertEqual(module.source_sha256,hashlib.sha256(source.read_bytes()).hexdigest())
++        self.assertEqual((module.words,module.symbols,module.relocations),(words,symbols,relocations))
++        # Every registered branch and page reference must relocate in a normal image.
++        relocated=relocated_words(words,relocations,symbols,0x6190000,0x4724200)
++        self.assertEqual(len(relocated),len(words))
++
++class FrameStamps(unittest.TestCase):
++    """The keyboard dock reads a host present counter and a stamp the game writes.
++
++    The adapter keeps no host pointer: +0xa8 is the counter the host advances each present (hle_os.c dm_guest_frame_tick),
++    +0xb0 the keyboard frame's stamp and +0xb8 the touch panel's. Lrecent_keyboard compares the first two, so a stamp written
++    through a pointer, or to another slot, silently disables the dock (the value stays 0) -- or faults, when the counter is read
++    as an address. These read the generated words, not the source, so a stale patches.py fails too."""
++
++    def setUp(self):
++        module=_load('patches.py')
++        self.words,self.symbols=module.words,module.symbols
++
++    def _at(self,name):return self.symbols[name]//4
++
++    def test_stamps_are_values_not_pointers(self):
++        # ldar x16,[x16] is the old host-pointer form: the counter itself would be dereferenced. Each hook's own body is
++        # checked, up to the next symbol, so one hook's ldar cannot hide behind another's span.
++        order=sorted((off,name) for name,off in self.symbols.items())
++        for name in ('_dm_view_keyboard_window','_dm_view_keyboard_frame','_dm_view_touch_page'):
++            at=self.symbols[name]//4
++            end=min((off for off,_ in order if off>self.symbols[name]),default=self.symbols[name]+0x200)//4
++            span=self.words[at:end]
++            self.assertTrue(span,f'{name}: empty span')
++            self.assertFalse([w for w in span if (w&0xfffffc00)==0xc8dffc00],f'{name}: atomic load through the stamp, which is a counter value')
++
++    def test_keyboard_window_stamps_the_counter(self):
++        # adrp/add state; ldr x16,[state+0xa8]; add x15,#56; stlr x16,[x15] -- the keyboard dialog's own stamp (+0x38).
++        # It must not be +0xb0: that is the keyboard frame's stamp, the only one the dock compares, and the dialog also
++        # draws on presents where the frame hook did not run.
++        at=self._at('_dm_view_keyboard_window')
++        tail=self.words[at:at+0x200]
++        seq=None
++        for i in range(len(tail)-4):
++            if ((tail[i]&0x9f00001f)==0x9000000f and (tail[i+1]&0xffc003ff)==0x910001ef
++                and tail[i+2]==0xf94055f0 and tail[i+3]==0x9100e1ef):
++                seq=i
++        self.assertIsNotNone(seq,'keyboard window: no ldr x16,[state+0xa8] then add x15,#56 (the +0x38 dialog stamp)')
++        self.assertEqual(tail[seq+4]&0xfffffc00,0xc89ffc00,f'keyboard window: the stamp after add #56 must be stlr x16,[x15], got {tail[seq+4]:#x}')
++
++    def test_stamp_offsets_are_the_free_slots(self):
++        # The hooks pass the slot offset in x17 (Ltouch_stamp adds it to the page base): 8 = +0xb0, 16 = +0xb8.
++        for name,slot in (('_dm_view_keyboard_frame',8),('_dm_view_touch_page',16)):
++            at=self._at(name)
++            span=self.words[at:at+0x40]
++            self.assertIn(0xd2800000|(slot<<5)|17,span,f'{name}: mov x17,#{slot} (state + {slot:#x}) not found')
++
++
++class ChainedStubSavesX30(unittest.TestCase):
++    """A hand-emitted stub that calls and then returns must save x30.
++
++    The bl writes its own return address into x30, so a stub that saved only its argument register returned to the
++    instruction after that bl and looped, popping 16 bytes each pass until the store met an unmapped page. A stub that
++    leaves through a tail b has no such contract: x30 is free after it. These assemble the profile's screen_shape stub
++    with a fake context and read the words it emits, so the assertion holds for every stub of the build."""
++
++    BASE, STATE = 0x8000000, 0x9000000
++
++    def setUp(self):
++        self.words, self.puts = [], []
++        self.ctx = SimpleNamespace(here=lambda: self.BASE + 4 * len(self.words), emit=self.words.append,
++                                   site=lambda off, orig: None, put=lambda off, words, why: self.puts.append((off, list(words))),
++                                   state=self.STATE)
++
++    def _stub(self, off):
++        # the branch put at a site names its stub; a bl there calls one directly and has no stub of its own
++        word = next(w for o, ws in self.puts if o == off for w in ws)
++        if word & 0xfc000000 != 0x14000000: return None
++        delta = word & 0x3ffffff
++        if delta & 0x2000000: delta -= 0x4000000
++        return (off + 4 * delta - self.BASE) // 4
++
++    @staticmethod
++    def _end(words, at):
++        for i in range(at, len(words)):
++            if words[i] == 0xd65f03c0: return i + 1, 'ret'
++            if words[i] & 0xfc000000 == 0x14000000: return i + 1, 'b'
++        return len(words), None
++
++    @staticmethod
++    def _saves_x30(words, at, end):
++        # any store of x30 through sp: stp xN,x30,[sp,#imm] (pre, post or offset) or str x30,[sp,#imm]
++        for w in words[at:end]:
++            if w & 0xff800000 in (0xa9000000, 0xa9800000, 0xa8c00000) and (w >> 10) & 31 == 30 and (w >> 5) & 31 == 31: return True
++            if w & 0xffc00000 == 0xf9000000 and w & 31 == 30 and (w >> 5) & 31 == 31: return True
++        return False
++
++    def test_every_stub_that_returns_from_a_call_saves_x30(self):
++        patches.FRAME_STEP['ff1d1c05670db6021c85b624a710b963'](self.ctx)
++        checked = 0
++        for off, _ in self.puts:
++            at = self._stub(off)
++            if at is None: continue
++            end, how = self._end(self.words, at)
++            calls = [w for w in self.words[at:end] if w & 0xfc000000 == 0x94000000]
++            if how != 'ret' or not calls: continue
++            checked += 1
++            self.assertTrue(self._saves_x30(self.words, at, end), f'{off:#x}: a stub that calls and returns must save x30')
++        self.assertTrue(checked, 'no stub of this build calls and returns')
++
++    def test_the_0x265140_chain_pairs_its_saves(self):
++        # The chained stub at nn::ui2d::DrawInfo::SetProjectionMtx: after the upstream y-row division, stp x0,x30 / adrp
++        # x15 / bl the adapter / ldp x0,x30 / ret.
++        patches.FRAME_STEP['ff1d1c05670db6021c85b624a710b963'](self.ctx)
++        at = self._stub(0x265140)
++        self.assertIsNotNone(at, '0x265140: no stub branch at the chained site')
++        end, how = self._end(self.words, at)
++        self.assertEqual(how, 'ret', '0x265140: the chain must return, not branch on')
++        body = self.words[at:end]
++        pair = [i for i, w in enumerate(body) if w == 0xa9bf7be0]
++        self.assertEqual(len(pair), 1, f'0x265140: one stp x0,x30,[sp,#-16]!, got {pair}')
++        i = pair[0]
++        self.assertEqual(body[i + 1] & 0x9f00001f, 0x9000000f, '0x265140: x15 is the state the adapter reads')
++        self.assertEqual(body[i + 2] & 0xfc000000, 0x94000000, '0x265140: the bl follows the state')
++        self.assertEqual(body[i + 3], 0xa8c17be0, f'0x265140: ldp x0,x30,[sp],#16 follows the bl, got {body[i + 3]:#x}')
++        self.assertEqual(body[-1], 0xd65f03c0)
++
++
++    def test_every_branch_targets_its_own_stub(self):
++        # A branch's immediate names a word count from its own address. A stub that was lengthened and left its
++        # branches alone still assembles, still runs, and jumps into the middle of another sequence: the +44 that
++        # used to reach the trailing ret reaches the ldp before it, popping 16 bytes the stub never pushed. Each
++        # target must therefore be an instruction of the stub it belongs to, and never the stub's tail branch.
++        patches.FRAME_STEP['ff1d1c05670db6021c85b624a710b963'](self.ctx)
++        # A hook jumps into the adapter's own body, whose internal branches are the assembly's labels, not a stub
++        # this test can bound: only the stubs the profile emits here are checked.
++        hooks = {off for off, _, _, _ in patches._view_hooks}
++        checked = 0
++        for off, _ in self.puts:
++            if off in hooks: continue
++            at = self._stub(off)
++            if at is None: continue
++            end, _ = self._end(self.words, at)
++            for i in range(at, end):
++                w = self.words[i]
++                if w & 0xff000010 == 0x54000000: imm, cond = (w >> 5) & 0x7ffff, True      # b.cond
++                elif w & 0x7e000000 == 0x36000000: imm, cond = (w >> 5) & 0x3fff, True     # tbz / tbnz
++                elif w & 0x7e000000 == 0x34000000: imm, cond = (w >> 5) & 0x7ffff, True    # cbz / cbnz
++                else: cond = False
++                if not cond: continue
++                if imm & (1 << (19 if w & 0x7e000000 == 0x36000000 else 18)): imm -= 1 << (20 if w & 0x7e000000 == 0x36000000 else 19)
++                target = i + imm
++                checked += 1
++                self.assertTrue(at <= target < end, f'{off:#x}: a branch at word {i - at} leaves its stub ({target - at})')
++        self.assertTrue(checked, 'no conditional branch in any stub of this build')
++
++
++class DuoAnchorMatchesItsSource(unittest.TestCase):
++    """The HUD adapter's words come from duo_anchor.c, and nothing regenerates them.
++
++    view.s has a generator, a source hash and a test; duo_anchor.c's __text is pasted into patches.py by hand.
++    Compiling the source here makes a change to one without the other a failure instead of a silent drift in
++    the running game. Apple's clang is the same tool the comment above the words names."""
++
++    @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('clang'), 'Apple ARM64 assembler required')
++    def test_embedded_words_are_the_sources_text(self):
++        import struct, subprocess, tempfile
++        source = PROFILE / 'duo_anchor.c'
++        with tempfile.TemporaryDirectory() as folder:
++            obj = Path(folder) / 'duo_anchor.o'
++            subprocess.run(['clang', '-arch', 'arm64', '-O2', '-ffreestanding', '-fno-builtin', '-fno-stack-protector',
++                            '-fno-jump-tables', '-fno-asynchronous-unwind-tables', '-c', str(source), '-o', str(obj)], check=True)
++            blob = obj.read_bytes()
++        cursor, text = 32, None
++        for _ in range(struct.unpack_from('<I', blob, 16)[0]):
++            cmd, size = struct.unpack_from('<II', blob, cursor)
++            if cmd == 0x19:
++                for j in range(struct.unpack_from('<I', blob, cursor + 64)[0]):
++                    at = cursor + 72 + 80 * j
++                    if blob[at:at + 16].rstrip(b'\0') == b'__text':
++                        text = struct.unpack_from('<Q', blob, at + 40)[0], struct.unpack_from('<I', blob, at + 48)[0]
++            cursor += size
++        self.assertIsNotNone(text, 'duo_anchor.o has no __text')
++        length, offset = text
++        words = list(struct.unpack('<%dI' % (length // 4), blob[offset:offset + length]))
++        anchor = _load('patches.py')._duo_anchor   # read fresh: the module-level copy is the one this file loaded first
++        embedded = [int(anchor[i:i + 8], 16) for i in range(0, len(anchor), 8)]
++        self.assertEqual(len(words), len(embedded), 'duo_anchor.c and the words in patches.py differ in length: recompile it')
++        for i, (got, want) in enumerate(zip(words, embedded)):
++            self.assertEqual(got, want, f'duo_anchor.c word {i} is {got:#010x}, patches.py has {want:#010x}: recompile it')
++
++
++if __name__=='__main__':unittest.main()
+diff --git a/docs/reference/rewriter.md b/docs/reference/rewriter.md
+index 554c102b..6e707d74 100644
+--- a/docs/reference/rewriter.md
++++ b/docs/reference/rewriter.md
+@@ -76,6 +76,22 @@ To enroll a cut for any game's own module:
+   - FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition: the 1.0.1 cheatslips file, anchored on the cartridge's `main`, compiles to exactly the hand-verified +0x43680 on 1.0.3 (12 of 12 cheats, 4 of 4 references each). The 1.0.3 file (5 ASM cheats with a code cave, 7 stat cheats, Mog's fatigue) compiles back to identical writes on 1.0.3 and to all 18 entries on the cartridge's build (code sites: 4 exact, 3 by body digest, 2 by window).
+   - [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md#cheats): a 1.10 Ryujinx list compiles back to identical writes and to 1.00, where every site lies 0x330 lower and the hook site was found by its body digest.
+ 
++### Build-registered adaptive-view adapters on the frame step state page
++
++- **Symptom:** on a picture taller than 16:9, cached projections, scissors, captures and field ranges keep the 16:9 values: the HUD and inline keyboard sit at the old edges, and a projection the game cached before the shape changed is reused unchanged.
++- **Cause:** the game keeps projection matrices and screen rectangles in cached objects, and its UI jobs can return a retained projection instead of going through the camera's getter. Changing the output size and the camera angle does not invalidate those caches.
++- **Fix:** a build's `FRAME_STEP` callback may also emit an owned ARM64 adapter (assembled from `view.s` by `gen_view_stubs.py`) into the patch area, then register hooks and cache checks with `ctx.site` / `ctx.put`. It shares the frame step state page (`ctx.state`), so no second state page, rewriter table or host file is needed; `dm_fps_state +0x58` carries the target aspect. Where an upstream stub and the adapter need the same site, one chained stub runs the upstream test first and then calls the adapter, with early returns retargeted to the single trailing `ret`. Hooks at a function's entry and after its global-matrix calculation are independent sites and can coexist.
++- **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#adaptive-view-consistency-current), 3.0.3 `main`, with `DM_SCREEN_ASPECT`.
++- **Check:** the 14 upstream screen-shape sites, 21 adapter hooks and 29 caches rewrite one image (`0x265140` has one cut); the chained stub's three early returns reach its `ret` by disassembly; `test_view_stubs.py` and `test_patches.py` pass. Device validation is open.
++
++### A hand-emitted stub that calls must save x30, not only its argument registers
++
++- **Symptom:** the game freezes on its first frame after a site is hit, the picture stops while audio continues, and the crash report has `pc == lr` with a fault address equal to `sp` inside a mapped stack region. Under lldb `sp` rises 16 bytes per iteration and the faulting instruction is a `ret` branching to itself.
++- **Cause:** a stub emitted by hand saved the argument register it had to preserve with `str x0,[sp,#-16]!` and restored it with `ldr x0,[sp],#16` before its `ret`. The `bl` in between overwrites `x30` with its own return address, so the trailing `ret` returns to the instruction right after that `bl` — the restore — and the stub loops. Each pass pops 16 bytes without a matching push, so `sp` climbs until it reaches an unmapped page, and the store there faults. A stub that ends in a tail `b` instead of `bl` + `ret` has no such contract and needs nothing saved.
++- **Fix:** save and restore `x30` with the argument register in one pair: `stp x0,x30,[sp,#-16]!` … `ldp x0,x30,[sp],#16`, which keeps the frame at 16 bytes and leaves early returns that skip the `bl` unchanged. Any hand-emitted stub that calls and then returns must treat `x30` as live across the call; only a leaf stub may omit it.
++- **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#adaptive-view-consistency-current), 3.0.3 `main+0x265140` (`nn::ui2d::DrawInfo::SetProjectionMtx`), the chained stub that runs the y-row division and then calls the adapter's `_dm_view_ui_projection`. The same site on the branch without the adapter chain is a bare `ret` and was never affected.
++- **Check:** disassemble the emitted stub for the `stp` / `ldp` pair around the `bl`; a rewrite of the same `main` from its original NSO is byte-identical to the one validated on the device.
++
+ ## Thread registers
+ 
+ ### System register accesses through x18

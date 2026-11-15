@@ -51,3 +51,6 @@
 0053-build-add-persistent-build-seeds-and-fast-refres.patch
 0054-mac-host-join-the-default-preferences-domain-at.patch
 0055-gfx-adaptive-ios-memory-pressure-convergence-for.patch
+0056-host-ios-render-a-wider-screen-in-its-own-shape.patch
+0057-host-touch-map-a-touch-on-a-wide-picture-back-on.patch
+0058-games-acnh-an-adaptive-view-adapter-on-the-frame.patch

@@ -112,7 +112,7 @@ final class GameUpdateCatalogTests: XCTestCase {
 
         let listed150 = GameUpdateCatalog.hasSpecificUpdate(titleID: tidSpecific150, appVersion: "1.5.0-local", gitSpecificChanged: nil)
         XCTAssertTrue(listed150.hasSpecific)
-        XCTAssertEqual(listed150.versionLabel, "1.5.0")
+        XCTAssertEqual(listed150.versionLabel, "1.5.0-local")   // the catalog names this release: the label shows the version as it runs, mark and all
 
         let gitOverrideTrue = GameUpdateCatalog.hasSpecificUpdate(titleID: tidUnlisted, appVersion: "1.5.0", gitSpecificChanged: true)
         XCTAssertTrue(gitOverrideTrue.hasSpecific)

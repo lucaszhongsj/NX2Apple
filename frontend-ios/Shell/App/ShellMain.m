@@ -48,6 +48,7 @@ static const void *g_active_fbase;
 static DmFwSnap g_fw_snaps[64];
 static int g_nfw_snaps;
 static int g_boot_ok;
+static int g_companion;   // the running game carries the companion's band (dm_companion_view_controller, ACNHCompanion.swift): a phone may stand up for it
 
 static NSString *documents(void) { return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0]; }
 
@@ -112,6 +113,7 @@ void dm_shell_return_to_library(void) {
         g_focus = NULL;
         g_present = NULL;
         g_boot_ok = 0;
+        g_companion = 0;
         if (fbase) restore_framework_data(fbase);
         UIWindow *window = nil;
         for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
@@ -338,6 +340,8 @@ const char *dm_shell_start_game(const char *const *keys, const char *const *valu
     g_active_fbase = info.dli_fbase;
     g_present = present;
     g_focus = focus;
+    // The companion's band is the only reason a phone may stand up in a game: the picture on top, the band under it (dm_layout, DmLayout.h).
+    g_companion = dlsym(h, "dm_companion_view_controller") != NULL;
     g_boot_ok = 1;
     return NULL;
 }
@@ -352,10 +356,11 @@ void dm_shell_present_game(void) {
 
 @interface App : UIResponder <UIApplicationDelegate>
 @end
-// Browsing may be portrait; phone gameplay stays landscape. UIKit manages unrestricted rotation on the Duo inner display.
+// Browsing may be portrait; phone gameplay stays landscape unless the game carries the companion's band, which is used standing up.
 static UIInterfaceOrientationMask shell_orientations(UITraitCollection *traits) {
     if (traits.userInterfaceIdiom != UIUserInterfaceIdiomPhone) return UIInterfaceOrientationMaskAll;
-    return g_boot_ok ? UIInterfaceOrientationMaskLandscape : UIInterfaceOrientationMaskAllButUpsideDown;
+    if (!g_boot_ok) return UIInterfaceOrientationMaskAllButUpsideDown;
+    return g_companion ? UIInterfaceOrientationMaskAllButUpsideDown : UIInterfaceOrientationMaskLandscape;
 }
 @implementation App
 - (UIInterfaceOrientationMask)application:(UIApplication *)application supportedInterfaceOrientationsForWindow:(UIWindow *)window {

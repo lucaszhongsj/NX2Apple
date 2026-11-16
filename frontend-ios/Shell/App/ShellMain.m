@@ -341,7 +341,10 @@ const char *dm_shell_start_game(const char *const *keys, const char *const *valu
     g_present = present;
     g_focus = focus;
     // The companion's band is the only reason a phone may stand up in a game: the picture on top, the band under it (dm_layout, DmLayout.h).
-    g_companion = dlsym(h, "dm_companion_view_controller") != NULL;
+    // Its profile rides in the framework's resources (build_ipa.sh bundles dm/companion.json for a game with one), not in its symbol
+    // table: project-framework.yml exports only the glue the shell dlopens.
+    NSString *carrier = [[@(executable) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"dm/companion.json"];
+    g_companion = [[NSFileManager defaultManager] fileExistsAtPath:carrier];
     g_boot_ok = 1;
     return NULL;
 }
@@ -352,6 +355,9 @@ void dm_shell_present_game(void) {
         if ([s isKindOfClass:UIWindowScene.class]) for (UIWindow *w in ((UIWindowScene *)s).windows) if (w.isKeyWindow || !window) window = w;
     if (!window || !g_present) { fprintf(stderr, "[RED] shell: no window for the game view\n"); return; }
     g_present((__bridge void *)window);
+    // A game that carries the band opened portrait in shell_orientations(): have the presented controller read the mask again, so a
+    // phone already standing up turns now rather than at its next turn.
+    [window.rootViewController setNeedsUpdateOfSupportedInterfaceOrientations];
 }
 
 @interface App : UIResponder <UIApplicationDelegate>

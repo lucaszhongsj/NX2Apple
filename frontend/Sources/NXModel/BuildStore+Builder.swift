@@ -47,6 +47,9 @@ extension BuildStore {
         // The bundled Python lives inside the signed app: a .pyc written there would change what the signature seals
         // (the packages are compiled at bundle time), and a user site must not shadow its pinned packages.
         denv.merge(BundledTools.environment(for: py)) { $1 }
+        // DMBuildVersion in the app's Info.plist: which launcher built it. A copy carrying hand-applied patches states
+        // its own version there, next to the game's version, which stays the game's.
+        denv["DM_BUILD_VERSION"] = AppUpdateStore.displayVersion
         return denv
     }
 }

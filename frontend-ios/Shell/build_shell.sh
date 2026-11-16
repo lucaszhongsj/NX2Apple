@@ -120,6 +120,10 @@ COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null) && { [ -z "$(git -
   /usr/libexec/PlistBuddy -c "Add :DMCommit string $COMMIT" Gen/Info.plist > /dev/null || die "DMCommit"; t "source: $COMMIT"; }
 /usr/libexec/PlistBuddy -c "Add :DMChain string $V" Gen/Info.plist > /dev/null || die "DMChain"
 /usr/libexec/PlistBuddy -c "Add :DMForkPatches string $DM_FORK_PATCHES" Gen/Info.plist > /dev/null || die "DMForkPatches"
+# DMBuildVersion: the launcher that built this shell (DM_BUILD_VERSION, its own display version), as build_ipa.sh writes it for
+# a one-game app, so a shell made by a patched launcher says which one made it
+if [ -n "${DM_BUILD_VERSION:-}" ]; then
+  /usr/libexec/PlistBuddy -c "Add :DMBuildVersion string $DM_BUILD_VERSION" Gen/Info.plist > /dev/null || die "DMBuildVersion"; t "built by: NX2Apple $DM_BUILD_VERSION"; fi
 if [ "$MODE" = --prepare-xcode ]; then
   t "Xcode project: $S/DmShell.xcodeproj (scheme DmShell)"
   t "Xcode derived data: $DD"

@@ -81,7 +81,7 @@ package enum ShellInstall {
     /// What build_shell.sh reads. `path` is the build's own tool PATH (xcodegen must be found on it).
     package static func projectEnvironment(root: String, frameworks: [String], bundleID: String, team: String, python: String,
                                    path: String, home: String, user: String, tmp: String? = nil, package: String? = nil,
-                                   engine: String? = nil) -> [String: String] {
+                                   engine: String? = nil, buildVersion: String? = nil) -> [String: String] {
         var env = ["SHELL_DIR": projectFolder(root: root),
                    "DM_SHELL_FRAMEWORKS": frameworks.joined(separator: "\n"),
                    "DM_BUNDLE_ID": bundleID,
@@ -92,6 +92,8 @@ package enum ShellInstall {
         if let tmp { env["TMPDIR"] = tmp }
         if let package { env["DM_SHELL_PACKAGE"] = package }
         if let engine { env["DM_ENGINE_DIR"] = engine }
+        // DMBuildVersion in the shell's Info.plist: which launcher built it, as build_ipa.sh writes it for a one-game app
+        if let buildVersion { env["DM_BUILD_VERSION"] = buildVersion }
         return env
     }
 
@@ -411,8 +413,9 @@ package struct ShellInstaller {
         return Outcome(ok: false, message: fmt("shell.noFramework", name, folder.isEmpty ? "shell-framework" : folder))
     }
 
-    package func install(framework: String, titleID: String, name: String, archive: String) -> Outcome {
-        let signed = signAndInstallApp(framework: framework, titleID: titleID, name: name)
+    package func install(framework: String, titleID: String, name: String, archive: String,
+                         buildVersion: String? = nil) -> Outcome {
+        let signed = signAndInstallApp(framework: framework, titleID: titleID, name: name, buildVersion: buildVersion)
         guard signed.outcome.ok else { return signed.outcome }
         if archive.isEmpty {
             var res = signed.outcome
@@ -427,7 +430,8 @@ package struct ShellInstaller {
     }
 
     /// Steps 3 to 6: prepare the shared app's library and project, sign it, and install the app bundle on the device.
-    func signAndInstallApp(framework: String, titleID: String, name: String) -> (outcome: Outcome, notes: [String]) {
+    func signAndInstallApp(framework: String, titleID: String, name: String,
+                           buildVersion: String? = nil) -> (outcome: Outcome, notes: [String]) {
         guard FileManager.default.fileExists(atPath: framework) else {
             return (missingFramework(framework, name: name), [])
         }
@@ -437,7 +441,7 @@ package struct ShellInstaller {
         // A device this Mac never paired is found out now, not after the signing: nothing is built for it
         if let refused = pairingRefusal() { return (refused, []) }
         // 3 and 4: the library and the project
-        let prepared = prepareShell(framework: framework, titleID: titleID, name: name)
+        let prepared = prepareShell(framework: framework, titleID: titleID, name: name, buildVersion: buildVersion)
         guard var library = prepared.library, let env = prepared.env else { return (prepared.failure!, []) }
         let projectName = t("shell.projectStage")
 

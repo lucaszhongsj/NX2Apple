@@ -22,7 +22,7 @@ extension ShellInstaller {
 
     /// Signs and installs the shared app from the frameworks already built in `shell.json`, without rebuilding any game or
     /// transferring archive game data.
-    package func installBuilt(framework: String, titleID: String, name: String) -> Outcome {
+    package func installBuilt(framework: String, titleID: String, name: String, buildVersion: String? = nil) -> Outcome {
         func withNotes(_ result: (outcome: Outcome, notes: [String])) -> Outcome {
             var outcome = result.outcome
             if !result.notes.isEmpty {
@@ -45,20 +45,20 @@ extension ShellInstaller {
                 return hot.outcome.ok ? withNotes(hot) : hot.outcome
             }
         }
-        let signed = signAndInstallApp(framework: framework, titleID: titleID, name: name)
+        let signed = signAndInstallApp(framework: framework, titleID: titleID, name: name, buildVersion: buildVersion)
         guard signed.outcome.ok else { return signed.outcome }
         return withNotes(signed)
     }
 
     /// Signs and installs the shared app once for all games built in a queue batch, then copies the missing game data of each game.
-    package func installBatch(_ games: [BatchGame]) -> Outcome {
+    package func installBatch(_ games: [BatchGame], buildVersion: String? = nil) -> Outcome {
         guard let last = games.last else {
             return Outcome(ok: false, message: fmt("shell.projectFailed", "empty batch"))
         }
         if games.count == 1 {
             var single = self
             single.pickedArtwork = last.pickedArtwork
-            return single.install(framework: last.framework, titleID: last.titleID, name: last.name, archive: last.archive)
+            return single.install(framework: last.framework, titleID: last.titleID, name: last.name, archive: last.archive, buildVersion: buildVersion)
         }
         let fm = FileManager.default
         for game in games where !fm.fileExists(atPath: game.framework) {
@@ -93,7 +93,7 @@ extension ShellInstaller {
 
         var batchInstaller = self
         batchInstaller.pickedArtwork = last.pickedArtwork
-        let signed = batchInstaller.signAndInstallApp(framework: last.framework, titleID: last.titleID, name: last.name)
+        let signed = batchInstaller.signAndInstallApp(framework: last.framework, titleID: last.titleID, name: last.name, buildVersion: buildVersion)
         guard signed.outcome.ok else {
             if let before { try? before.write(to: URL(fileURLWithPath: stateFile), options: .atomic) }
             else if fm.fileExists(atPath: stateFile) { try? fm.removeItem(atPath: stateFile) }

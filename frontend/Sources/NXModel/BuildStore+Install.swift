@@ -56,7 +56,8 @@ extension BuildStore {
         let device = devices.installDevice
         DispatchQueue.global(qos: .userInitiated).async {
             let result = dataOnly ? installer.installData(titleID: titleID, archive: archive)
-                                  : installer.install(framework: framework, titleID: titleID, name: name, archive: archive)
+                                  : installer.install(framework: framework, titleID: titleID, name: name, archive: archive,
+                                                            buildVersion: AppUpdateStore.displayVersion)
             if !dataOnly, result.ok {
                 PostBuildCleanup.cleanBuiltFrameworkContainer(framework)
             }
@@ -96,7 +97,8 @@ extension BuildStore {
         let installer = makeInstaller()
         let device = devices.installDevice
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = installer.installBuilt(framework: framework, titleID: titleID, name: name)
+            let result = installer.installBuilt(framework: framework, titleID: titleID, name: name,
+                                                buildVersion: AppUpdateStore.displayVersion)
             hop {
                 self.installPhaseActive = false
                 if self.stopping {
@@ -145,7 +147,7 @@ extension BuildStore {
         let target = devices
         let device = devices.installDevice
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = dataOnly ? installer.installBatchData(batchGames) : installer.installBatch(batchGames)
+            let result = dataOnly ? installer.installBatchData(batchGames) : installer.installBatch(batchGames, buildVersion: AppUpdateStore.displayVersion)
             if !dataOnly, result.ok {
                 let surviving = Set(ShellLibrary.load(root: root).games.map { $0.titleID.uppercased() })
                 for game in games where surviving.contains(game.titleID.uppercased()) {
@@ -347,7 +349,8 @@ extension BuildStore {
         }
         var env = ShellInstall.projectEnvironment(root: shell.root, frameworks: library.games.map(\.framework), bundleID: bundle,
                                                   team: team, python: python, path: toolPath, home: NSHomeDirectory(), user: NSUserName(),
-                                                  tmp: NSTemporaryDirectory(), package: package, engine: engineRoot)
+                                                  tmp: NSTemporaryDirectory(), package: package, engine: engineRoot,
+                                                  buildVersion: AppUpdateStore.displayVersion)
         env.merge(BundledTools.environment(for: python)) { $1 }
         let xcconfig = shell.root + "/project/Gen/dm.xcconfig"
         if (try? String(contentsOfFile: xcconfig, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true

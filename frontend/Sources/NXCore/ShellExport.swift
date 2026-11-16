@@ -95,7 +95,7 @@ extension ShellInstaller {
 
     /// Steps 3 and 4 of the install, which the export shares: the library with this game, and the shell's project.
     /// Exactly one of `failure` and (`library`, `env`) is set. `notes` name the games left out because their framework is incomplete.
-    func prepareShell(framework: String, titleID: String, name: String)
+    func prepareShell(framework: String, titleID: String, name: String, buildVersion: String? = nil)
         -> (library: ShellLibrary?, env: [String: String]?, failure: Outcome?, notes: [String]) {
         // 3: the library
         ShellInstall.sweepDiscarded(in: ShellInstall.frameworksMirror(root: root))
@@ -158,7 +158,8 @@ extension ShellInstaller {
         let engineRoot = EngineLayout.root(repo)
         var env = ShellInstall.projectEnvironment(root: root, frameworks: library.games.map(\.framework), bundleID: library.bundleID,
                                                   team: team, python: python, path: toolPath, home: NSHomeDirectory(), user: NSUserName(),
-                                                  tmp: NSTemporaryDirectory(), package: package, engine: engineRoot)
+                                                  tmp: NSTemporaryDirectory(), package: package, engine: engineRoot,
+                                                  buildVersion: buildVersion)
         env.merge(BundledTools.environment(for: python)) { $1 }
         let projectName = t("shell.projectStage")
         begin(Self.projectStageID, projectName)
@@ -178,10 +179,10 @@ extension ShellInstaller {
     }
 
     /// The export: the library and the project, the unsigned build, the entitlements, the IPA. Needs no device and no team.
-    package func export(framework: String, titleID: String, name: String) -> Outcome {
+    package func export(framework: String, titleID: String, name: String, buildVersion: String? = nil) -> Outcome {
         let fm = FileManager.default
         guard fm.fileExists(atPath: framework) else { return missingFramework(framework, name: name) }
-        let prepared = prepareShell(framework: framework, titleID: titleID, name: name)
+        let prepared = prepareShell(framework: framework, titleID: titleID, name: name, buildVersion: buildVersion)
         guard let library = prepared.library else { return prepared.failure! }
 
         // The unsigned build, in the export's own derived data

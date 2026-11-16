@@ -15,7 +15,8 @@ extension BuildStore {
         let installer = makeInstaller()
         let root = installer.root
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = installer.export(framework: framework, titleID: titleID, name: name)
+            let result = installer.export(framework: framework, titleID: titleID, name: name,
+                                          buildVersion: AppUpdateStore.displayVersion)
             if result.ok {
                 PostBuildCleanup.cleanShellExportProducts(root: root)
                 let surviving = Set(ShellLibrary.load(root: root).games.map { $0.titleID.uppercased() })

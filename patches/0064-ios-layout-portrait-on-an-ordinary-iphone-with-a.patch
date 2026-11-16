@@ -1,0 +1,496 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Mon, 16 Nov 2026 11:36:13 +0800
+Subject: [PATCH] ios/layout: portrait on an ordinary iPhone with a 16:9
+ picture and a companion band
+
+Allow portrait on the phone, give the picture the height its own width asks for (no bars on a 19.5:9 screen), keep a panel view under the pad in the band, and run handheld while the phone stands up so the game's own keyboard takes touches.
+
+The picture never takes more than half the window, so an iPad's taller picture keeps the midpoint split it had; a Duo's fold still sets both edges. A console mode chosen in the in-game menu while standing up survives the return to landscape.
+
+Front-end changes only: no host, rewriter or shader change. The Duo harness covers the split, the panel's place under the pad, orientation policy and the console mode switch (41 tests).
+
+Upstream-Status: pending
+Reason: The ACNH companion: Eden Duo's reader and the band a phone standing up shows it in; nxnative carries it on feat/acnh-companion
+Issue: none yet: no upstream issue for the companion
+
+---
+ dm/games/01006F8002326000/README.md        |  10 ++
+ dm/ios/Sources/DmLayout.h                  |  36 ++++--
+ dm/ios/Sources/front_ios.m                 |  47 +++++++-
+ dm/ios/project.yml                         |   1 +
+ dm/ios/tests/duo/Sources/DuoRuntimeStubs.m |   3 +
+ dm/ios/tests/duo/Tests/DuoHarnessTests.m   | 125 ++++++++++++++++++++-
+ dm/ios/tests/duo/project.yml               |   1 +
+ dm/ios/tests/test_orientation_policy.py    |   5 +-
+ docs/playing.md                            |   2 +-
+ docs/reference/rendering.md                |   2 +-
+ docs/settings.md                           |   2 +-
+ 11 files changed, 209 insertions(+), 25 deletions(-)
+
+diff --git a/dm/games/01006F8002326000/README.md b/dm/games/01006F8002326000/README.md
+index 40980226..ee2cd6a2 100644
+--- a/dm/games/01006F8002326000/README.md
++++ b/dm/games/01006F8002326000/README.md
+@@ -59,6 +59,16 @@ With `DM_SCREEN_ASPECT=1.43` (launcher setting *Picture shape*, offered because
+ 
+ Checked on a Mac (M1, macOS 27, headless, an island save) against 16:9: the 3D view keeps 16:9's sides and shows more above and below; the title's version, press-A and settings lines, the island's ZL icon, clock, minimap and button guides sit at the new edges; the pockets, the phone (its backdrop's light band stretched) and the save dialog keep their shape. On an iPhone Duo (iOS 27.1) an earlier build of this looked right to its player. Open: an NPC's dialog box stays at its 16:9 place (-320), not at the taller screen's bottom edge; the phone's blurred backdrop shows a hard edge at its top left.
+ 
++## iPhone portrait (current)
++
++A phone standing up shows the game's 16:9 picture above the touch controls, not a portrait picture: `dm/ios/Sources/DmLayout.h` gives the picture the height its own width asks for, puts it at the safe area's top and gives the rest of the window to the band under it, where `DmGamepad.m`'s portrait anchors draw the pad (the two thumb groups at 0.28 and 0.72 of the width, 0.58 down) over a panel view the front end keeps for what the game's own screens cannot show there. A 390x844 phone (iPhone 14 and the like) gets a 390x219 picture with no bars above or below it and a 390x566 band; the safe areas are kept whole, so the notch and the home indicator are clear of both. Halving that window instead left the picture 219 of the upper part's 422 points, bars making up the other 48 % of it. The picture never takes more than half the window: an iPad's 4:3 asks for more than half, so it keeps the midpoint split it had, and an iPad mini's 1.52 picture is its own height either way, with only the bars it used to have going to the band. A fold sets both edges itself.
++
++The picture keeps 16:9 because a phone's long side is 1.78 to 2.16 times its short one, and 16:9 across the full width is what leaves the band the room a phone standing up has. The front end therefore resolves *Picture shape* `auto` to `0` (16:9) for a window taller than it is wide whose long side is 1.77 or more, and keeps the window's own shape for an iPad or an unfolded Duo (1.33 to 1.52), where the picture is taller than 16:9.
++
++**`auto` is resolved once, at the game's start**, because `DM_SCREEN_ASPECT` is written into the frame step state page and the game builds its window textures from it. A game started in portrait keeps its 16:9 picture after the phone turns to landscape (with black bars at the sides); to get the wider picture of [Screen shape](#screen-shape-dm_screen_aspect-current) on a 19.5:9 phone, start in landscape. Turning a landscape game to portrait keeps the wide picture, fitted into the upper part.
++
++**A phone standing up is handheld, so the game's own keyboard takes touches.** The profile sets no `op_mode`, so the game starts docked and the host hands it no touch points (`touch_read` in `hle_hid.c`), which leaves the game's keyboard unreachable. The front end therefore switches the console mode by the screen's orientation while no TV shows the picture (`followOrientation` in `front_ios.m`): standing up it goes handheld and lying down it returns to the mode the player had, a choice made in the in-game menu included. The game reads touches in both modes, so nothing else has to change, and the switch is the console mode change notification the game watches, so it follows while it runs. Handheld also renders at 1280x720, so the picture is the handheld one while the phone stands up. *Console mode* in the in-game menu (or `DM_OPMODE=0` in `Documents/env.txt`) still works for a phone lying down.
++
+ ## Mac routes
+ 
+ - From a fresh save, `DM_KEYS="40:A*51/2,145:B*12/0.4,151:Down,152:Right*4/0.4,154.5:A,155.5:Right*4/0.4,158:A,159:Down*2/0.4,160.5:Left*2/0.4,162:A,163.5:Plus,167:A*4/2,175:Plus,178:A*146/2,179:Plus*30/4"` names the player "tom" on the keyboard, takes the defaults, watches the movie and reaches the dock at about frame 14,100 (470 s).
+diff --git a/dm/ios/Sources/DmLayout.h b/dm/ios/Sources/DmLayout.h
+index 3301c556..3bc79ec1 100644
+--- a/dm/ios/Sources/DmLayout.h
++++ b/dm/ios/Sources/DmLayout.h
+@@ -5,7 +5,12 @@
+ 
+ NS_ASSUME_NONNULL_BEGIN
+ 
+-typedef struct { CGRect game, controls; BOOL separated, topSafeOnly, customControlsFullBounds, onTV; } DmLayout;
++// game: the picture. companion: the band under it, where a phone standing up shows what the game's own screens cannot (the pad floats over it, so the
++// panel is only where no key is drawn). controls: the pad's area, which in a split is the companion's band. Zero and unused where separated is NO.
++// A split's companion and controls are the same rectangle: DmGamepad.m owns the band's hit testing and takes every touch in it (one on no control
++// goes to gameBegin, which a split refuses outside the picture), so the panel takes no touch of its own. A panel that must be touched needs that
++// dispatch changed first.
++typedef struct { CGRect game, companion, controls; BOOL separated, topSafeOnly, customControlsFullBounds, onTV; } DmLayout;
+ 
+ static inline BOOL dm_layout_custom_controls_full_bounds(CGRect bounds, BOOL hingeClosed) {
+     return hingeClosed && bounds.size.width > bounds.size.height;
+@@ -37,6 +42,15 @@ static inline CGRect dm_aspect_fill(CGRect b, CGFloat aspect) {
+ 
+ static inline BOOL dm_picture_fill(const char *_Nullable value) { return value && !strcmp(value, "fill"); }   // DM_PICTURE_FIT: fit (default) or fill
+ 
++// Picture shape "auto" (the launcher's Match screen): the window's own shape when it is taller than 16:9 (an iPad's 4:3, an unfolded iPhone Duo's 1.43:1) or
++// wider (a 19.5:9 phone lying down at 2.17:1), else 16:9. A phone standing up keeps 16:9: its picture's band takes the height the picture's own width asks
++// for (dm_layout), so a 16:9 picture fills the width with no bars and the band keeps the rest of the window. The range is loader.c's (1.3 to 2.4). 0 = 16:9.
++static inline float dm_picture_shape_auto(CGSize window) {
++    double r = MAX(window.width, window.height) / MAX(MIN(window.width, window.height), 1);
++    if (window.height > window.width && r >= 1.77) r = 0;   // a phone standing up is not a wide screen
++    return r >= 1.3 && r < 2.4 ? (float)r : 0.0f;
++}
++
+ static inline CGRect dm_horizontal_division(CGRect b, CGRect division) {
+     if (CGRectIsNull(division) || division.size.width <= division.size.height) return CGRectNull;
+     // Preserve zero-height inactive folds and clip regions during display handoff.
+@@ -50,24 +64,28 @@ static inline CGRect dm_horizontal_division(CGRect b, CGRect division) {
+ }
+ 
+ static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOpen, CGRect division, CGFloat aspect) {
+-    DmLayout l = { dm_aspect_fit(b, aspect), b, NO, NO, NO, NO };
++    DmLayout l = { dm_aspect_fit(b, aspect), CGRectZero, b, NO, NO, NO, NO };
+     if (CGRectIsEmpty(b)) return l;
+     division = dm_horizontal_division(b, division);
+     BOOL portrait = b.size.height > b.size.width;
+     if (!portrait && (!partiallyOpen || CGRectIsNull(division))) return l;
+-    if (CGRectIsNull(division)) division = CGRectMake(b.origin.x, CGRectGetMidY(b), b.size.width, 0);
+     CGRect safe = UIEdgeInsetsInsetRect(b, insets);
+-    CGRect upper = CGRectMake(CGRectGetMinX(safe), CGRectGetMinY(safe), safe.size.width,
+-                             CGRectGetMinY(division) - CGRectGetMinY(safe));
+-    CGRect lower = CGRectMake(CGRectGetMinX(b), CGRectGetMaxY(division), b.size.width,
+-                             CGRectGetMaxY(b) - CGRectGetMaxY(division));
++    // Where the picture's part ends and the band begins. A phone standing up with no fold gives the picture the height its own width asks for, so a 16:9
++    // picture has no bars above or below: halving a 19.5:9 phone leaves 9:9.75, where nearly half of the picture's part was bars. It never takes more than
++    // half the window, so a squarer window keeps the midpoint: an iPad's 4:3 asks for 570 of 820 across, over half, and the band keeps at least half. A
++    // taller picture (an iPad mini's 1.52) is the picture's own height either way, so only the bars it used to have go to the band. A fold sets both edges.
++    CGFloat upperBottom = CGRectIsNull(division) ? MIN(CGRectGetMidY(b), CGRectGetMinY(safe) + safe.size.width / MAX(aspect, 0.001))
++                                                 : CGRectGetMinY(division);
++    CGFloat bandTop = CGRectIsNull(division) ? upperBottom : CGRectGetMaxY(division);
++    CGRect upper = CGRectMake(CGRectGetMinX(safe), CGRectGetMinY(safe), safe.size.width, upperBottom - CGRectGetMinY(safe));
++    CGRect lower = CGRectMake(CGRectGetMinX(b), bandTop, b.size.width, CGRectGetMaxY(b) - bandTop);
+     if (upper.size.height <= 0 || CGRectGetMaxY(safe) <= CGRectGetMinY(lower)) return l;
+-    l.game = dm_aspect_fit(upper, aspect); l.controls = lower; l.separated = YES;
++    l.game = dm_aspect_fit(upper, aspect); l.controls = lower; l.companion = lower; l.separated = YES;
+     return l;
+ }
+ 
+ // The picture is on a TV (front_ios.m DmTVSceneDelegate): the controls take the whole view and no touch goes to the game's touch screen (the game is docked there).
+-static inline DmLayout dm_layout_pad_only(CGRect b) { return (DmLayout){ CGRectZero, b, NO, NO, NO, YES }; }
++static inline DmLayout dm_layout_pad_only(CGRect b) { return (DmLayout){ CGRectZero, CGRectZero, b, NO, NO, NO, YES }; }
+ 
+ // Fill covers the full view only in the overlay layout (landscape). A portrait or tabletop split keeps the picture fitted in its
+ // area above the controls, where cropping a small picture would cost more than the bars.
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index 4952d08d..c30b7efa 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -96,6 +96,7 @@ static void tv_attach(void);
+ 
+ @interface DmRootVC : UIViewController
+ @property (nonatomic, strong) DmGameView *game;
++@property (nonatomic, strong) UIView *companion;   // under the pad, in the band a split gives it (DmLayout.h dm_layout): what the game's own screens cannot show there
+ @property (nonatomic, strong) UIView *pad;
+ @property (nonatomic, strong) UILabel *fps;
+ @property (nonatomic) BOOL launched;
+@@ -103,6 +104,8 @@ static void tv_attach(void);
+ @property (nonatomic) BOOL fill;   // DM_PICTURE_FIT=fill: in landscape the picture covers the screen, its edges cropped (DmLayout.h dm_layout_picture)
+ @property (nonatomic) BOOL partiallyOpen;   // an iPhone Duo's hinge half open (UIHingeInteraction, iOS 27.1)
+ @property (nonatomic) NSInteger hingeStatus;
++@property (nonatomic) BOOL standing;   // the last orientation followOrientation saw: YES with the phone up
++@property (nonatomic) int modeWhenLying;   // the console mode to go back to when the phone lies down; -1 = standing, nothing to restore
+ @property (nonatomic, copy) NSString *layoutLog;   // the last layout line logged
+ #if __has_include(<UIKit/UIHingeInteraction.h>)
+ - (void)hingeChanged:(UIHinge *)hinge API_AVAILABLE(ios(27.1));
+@@ -171,18 +174,21 @@ static void launcher_done(void) { [g_root startGame]; }
+         lb.text = @"Game files not found.\nPut the RomFS folder into this App's Documents as \"romfs\" (Files app), then restart.";
+         [self.view addSubview:lb]; return;
+     }
++    self.modeWhenLying = -1;   // the first layout pass sets the mode for the orientation the game starts in
+     dm_cloud_saves_env();   // DM_SAVE_SYNC from the launcher's Cloud saves pick, before the game's first save mount reads it (CloudSaves.m, save_sync.h)
+     front_hud_env();   // before the process's first Metal device, which reads MTL_HUD_ENABLED (an env file's DM_METAL_HUD sets it in main.m already; GitHub issue #840)
+     const char *dev = front_ios_device_check();   // that first device: a GPU without BC textures is refused here, not at launch, so the launcher's HUD switch counts
+     if (dev) { [self showHint:[NSString stringWithFormat:@"This device is not supported.\n%s", dev]]; return; }   // the host does not start
+     {   // Picture shape "auto" (the launcher's Match screen): the app window's own shape when it is taller or wider than 16:9 (an iPad's 4:3, an unfolded iPhone Duo's 1.43:1,
+-        // a 19.5:9 phone in landscape at 2.17:1; loader.c takes 1.3 to 2.4), else 16:9. The window's, not the screen's: on an iPad under Stage Manager or Split View the app does
+-        // not fill the screen. Resolved here, before the host writes the state page (main.c dm_fps_state_apply)
++        // a 19.5:9 phone in landscape at 2.17:1), else 16:9. The window's, not the screen's: on an iPad under Stage Manager or Split View the app does not fill the screen. Resolved
++        // here, before the host writes the state page (main.c dm_fps_state_apply). A phone standing up keeps 16:9 (DmLayout.h dm_picture_shape_auto): its picture sits above
++        // the controls, where a picture of its own 1.78 to 2.16:1 shape would be shorter than the 16:9 one
+         const char *a = getenv("DM_SCREEN_ASPECT");
+         if (a && !strcmp(a, "auto")) {
+-            CGSize sz = self.view.window ? self.view.window.bounds.size : UIScreen.mainScreen.bounds.size; double r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
+-            char v[16]; if (r >= 1.3 && r < 2.4) snprintf(v, sizeof v, "%.3f", r); else strcpy(v, "0");
+-            setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: window %.0fx%.0f points (%.3f:1) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, r, v);
++            CGSize sz = self.view.window ? self.view.window.bounds.size : UIScreen.mainScreen.bounds.size;
++            float r = dm_picture_shape_auto(sz);
++            char v[16]; if (r > 0) snprintf(v, sizeof v, "%.3f", r); else strcpy(v, "0");
++            setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: window %.0fx%.0f points → DM_SCREEN_ASPECT=%s", sz.width, sz.height, v);
+         }
+     }
+     self.fill = dm_picture_fill(getenv("DM_PICTURE_FIT"));
+@@ -195,6 +201,13 @@ static void launcher_done(void) { [g_root startGame]; }
+     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
+     else if (getenv("DM_HUD_PER_LAYER")) { g_layer.developerHUDProperties = @{@"mode": @"disabled"}; LOG("front end: Metal performance HUD off (DM_METAL_HUD)"); }   // the shell turns Metal's HUD on for every start (ShellMain.m)
+     dm_haptics_apple_init();
++    // The band under the picture in a split (DmLayout.h dm_layout companion): the pad floats over it, so only what no key covers is seen. Hidden while there is no
++    // split: the picture takes the whole view and the pad's own background is all there is. Touches go through it to the pad, which owns the band's hit testing
++    self.companion = [[UIView alloc] initWithFrame:CGRectZero];
++    self.companion.backgroundColor = [UIColor colorWithWhite:0.07 alpha:1];
++    self.companion.userInteractionEnabled = NO;
++    self.companion.hidden = YES;
++    [self.view addSubview:self.companion];
+     self.pad = dm_gamepad_view(self.view.bounds);
+     self.pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+     [self.view addSubview:self.pad];
+@@ -205,9 +218,28 @@ static void launcher_done(void) { [g_root startGame]; }
+     tv_attach();   // a TV connected while the launcher showed
+     front_ios_boot();
+ }
++static UIWindow *g_tv;   // the TV scene's window while one shows the picture (tv_attach)
++// Console mode follows the screen's orientation while no TV shows the picture: a phone standing up is handheld, so the game's own touch screens (its software
++// keyboard above all) take touches, and the picture is the handheld 1280x720 one; lying down it returns to the mode the player had. A TV docks the game
++// whatever the phone does (tv_attach / tv_detach own the mode then). A choice made in the in-game menu while standing up is the one lying down returns to.
++// The switch is dm_set_opmode, which pushes the console mode change notification the game watches, so it follows while it runs.
++- (void)followOrientation:(CGRect)b {
++    if (g_tv) return;   // the picture is on the TV: docked there
++    BOOL standing = b.size.height > b.size.width;
++    if (standing == self.standing) return;
++    self.standing = standing;
++    if (standing) {
++        self.modeWhenLying = dm_opmode();
++        if (self.modeWhenLying != 0) { dm_set_opmode(0); dm_gamepad_opmode_changed(); LOG("front end: console mode handheld, a phone standing up (the game's own keyboard takes touches)"); }
++    } else if (self.modeWhenLying >= 0) {
++        int m = self.modeWhenLying; self.modeWhenLying = -1;
++        if (dm_opmode() != m) { dm_set_opmode(m); dm_gamepad_opmode_changed(); LOG("front end: console mode %s again, lying down", m ? "docked" : "handheld"); }
++    }
++}
+ - (void)viewDidLayoutSubviews {
+     [super viewDidLayoutSubviews];
+     CGRect b = self.view.bounds; if (!self.game) return;
++    [self followOrientation:b];
+     CGRect division = CGRectNull;   // an iPhone Duo's fold, as UIKit reports it (iOS 27.1)
+     NSMutableArray<NSString *> *regionLog = [NSMutableArray array];
+ #if __has_include(<UIKit/UIHingeInteraction.h>)
+@@ -224,6 +256,8 @@ static void launcher_done(void) { [g_root startGame]; }
+     BOOL onTV = self.game.superview != self.view;   // the TV's view lays the picture out; the phone is all pad
+     DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect), b, self.fill, g_picture_aspect);
+     if (!onTV) self.game.frame = layout.game;
++    self.companion.frame = layout.companion;
++    self.companion.hidden = !layout.separated;
+     layout.topSafeOnly = duoPortrait;
+     BOOL hingeClosed = NO;
+ #if __has_include(<UIKit/UIHingeInteraction.h>)
+@@ -273,7 +307,7 @@ UIViewController *front_ios_root(void) { return [DmRootVC new]; }
+ - (void)viewDidLoad { [super viewDidLoad]; self.view.backgroundColor = UIColor.blackColor; }
+ - (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews]; for (UIView *v in self.view.subviews) v.frame = dm_aspect_fit(self.view.bounds, g_picture_aspect); }
+ @end
+-static UIWindow *g_tv; static int g_tv_mode_was = -1;
++static int g_tv_mode_was = -1;   // the console mode to go back to when the TV is unplugged
+ static void tv_attach(void) {
+     DmGameView *v = g_root.game; if (!g_tv || !v || v.superview == g_tv.rootViewController.view) return;
+     // at most 1080p: the game renders 1080p docked, and a 4K drawable only adds an upscale and a 4K stream (an AirPlay TV showed black, the GPU went from 15 to 60 ms a frame).
+@@ -314,6 +348,7 @@ bool dm_setting_live(const char *env, const char *value) {
+         if (!value) return true;
+         int m = atoi(value) ? 1 : 0;
+         if (g_tv_mode_was >= 0) { g_tv_mode_was = m; LOG("front end: console mode %s once the TV is unplugged (in-game menu)", m ? "docked" : "handheld"); return true; }
++        if (g_root.standing) g_root.modeWhenLying = m;   // the player chose it while standing up: lying down keeps that choice, not the one it replaced
+         dm_set_opmode(m); dm_gamepad_opmode_changed(); LOG("front end: console mode %s (in-game menu)", m ? "docked" : "handheld");
+         return true;
+     }
+diff --git a/dm/ios/project.yml b/dm/ios/project.yml
+index ad77a601..e1baf38c 100644
+--- a/dm/ios/project.yml
++++ b/dm/ios/project.yml
+@@ -36,6 +36,7 @@ targets:
+         UIFileSharingEnabled: true          # Documents (log.txt, saves) visible in the Files app
+         LSSupportsOpeningDocumentsInPlace: true
+         UISupportedInterfaceOrientations:
++          - UIInterfaceOrientationPortrait
+           - UIInterfaceOrientationLandscapeRight
+           - UIInterfaceOrientationLandscapeLeft
+         UISupportedInterfaceOrientations~ipad:
+diff --git a/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m b/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
+index 7378ebf6..775807c2 100644
+--- a/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
++++ b/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
+@@ -118,6 +118,9 @@ const struct dm_profile *dm_profile(void) {
+ int front_ios_boot_ok(void) { return 1; }
+ void front_ios_boot(void) {}
+ bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewController; (void)done; return false; }
++// The controller applet (DmGamepad.m ctrl_support) and the offline web page's touch pass-through: the harness runs no game and no page
++int dm_players_reported(void) { return 1; }
++int front_web_touch(void) { return 0; }
+ 
+ uint64_t g_t0_ns;
+ uint64_t now_ns(void) { return 1; }
+diff --git a/dm/ios/tests/duo/Tests/DuoHarnessTests.m b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+index f188126c..5237344c 100644
+--- a/dm/ios/tests/duo/Tests/DuoHarnessTests.m
++++ b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+@@ -243,15 +243,16 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     const UIEdgeInsets insets[] = {UIEdgeInsetsMake(59, 0, 34, 0), UIEdgeInsetsMake(50, 0, 24, 0)};
+     for (NSUInteger i = 0; i < 2; i++) {
+         CGRect bounds = sizes[i];
+-        CGFloat splitY = CGRectGetMidY(bounds);
+         CGRect safe = UIEdgeInsetsInsetRect(bounds, insets[i]);
+         DmLayout layout = dm_layout(bounds, insets[i], NO, CGRectNull, DM_PICTURE_16_9);
++        // No fold: the band starts where the picture's own width puts its bottom (DmLayout.h dm_layout), never past the midpoint
++        CGFloat splitY = MIN(CGRectGetMidY(bounds), CGRectGetMinY(safe) + safe.size.width / DM_PICTURE_16_9);
+         XCTAssertTrue(layout.separated);
+         XCTAssertTrue(CGRectEqualToRect(layout.controls, CGRectMake(0, splitY, bounds.size.width, bounds.size.height - splitY)));
+         XCTAssertEqualWithAccuracy(layout.game.size.width / layout.game.size.height, 16.0 / 9.0, 0.001);
+         XCTAssertGreaterThanOrEqual(CGRectGetMinY(layout.game), CGRectGetMinY(safe));
+         XCTAssertLessThanOrEqual(CGRectGetMaxY(layout.game), splitY);
+-        XCTAssertLessThanOrEqual(CGRectGetMaxY(layout.game), CGRectGetMinY(layout.controls), @"The midpoint boundary leaves no video/control overlap");
++        XCTAssertLessThanOrEqual(CGRectGetMaxY(layout.game), CGRectGetMinY(layout.controls), @"The band's top leaves no video/control overlap");
+     }
+ }
+ 
+@@ -273,11 +274,124 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     XCTAssertLessThanOrEqual(CGRectGetMaxY(separated.game), CGRectGetMinY(separated.controls));
+ }
+ 
++- (void)testPictureShapeAutoKeepsAPhoneStandingUpAt16By9 {
++    // A phone's long side is 1.78 to 2.16 times its short one; a picture of that shape above the controls would be shorter than the 16:9 one
++    XCTAssertEqual(dm_picture_shape_auto(CGSizeMake(390, 844)), 0.0f, @"An iPhone 14 standing up keeps 16:9");
++    XCTAssertEqual(dm_picture_shape_auto(CGSizeMake(375, 667)), 0.0f, @"An iPhone SE standing up keeps 16:9");
++    XCTAssertEqual(dm_picture_shape_auto(CGSizeMake(430, 932)), 0.0f, @"An iPhone Pro Max standing up keeps 16:9");
++    // An iPad or an unfolded Duo standing up is 1.33 to 1.52 and keeps its own shape, which fills the upper part better than 16:9
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(820, 1180)), 1180.0 / 820.0, 0.001);
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(744, 1133)), 1133.0 / 744.0, 0.001);
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(1032, 1376)), 1376.0 / 1032.0, 0.001, @"An unfolded Duo standing up is 3:4 by its long side");
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(1376, 1032)), 1376.0 / 1032.0, 0.001, @"An unfolded Duo lying down is 4:3");
++    // A window wider than 16:9 stays 16:9 until loader.c takes the wider range the screen-shape work for phones lying down needs
++    XCTAssertEqual(dm_picture_shape_auto(CGSizeMake(844, 390)), 0.0f, @"A 19.5:9 phone lying down");
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(1024, 768)), 1024.0 / 768.0, 0.001, @"An iPad lying down is 4:3");
++    // A square window has no shape of its own to take
++    XCTAssertEqual(dm_picture_shape_auto(CGSizeMake(600, 600)), 0.0f);
++    XCTAssertEqual(dm_picture_shape_auto(CGSizeZero), 0.0f);
++}
++
+ - (void)testPortraitWithoutHingeStatusStillSplitsVideoAboveControls {
++    // A phone standing up gives the 16:9 picture the height its own width asks for (390 x 219), so no bars above or below it, and the rest of the window to
++    // the band; halving a 19.5:9 phone left 9:9.75, where nearly half of the picture's part was bars
+     DmLayout layout = dm_layout(CGRectMake(0, 0, 390, 844), UIEdgeInsetsMake(59, 0, 34, 0), NO, CGRectNull, DM_PICTURE_16_9);
+     XCTAssertTrue(layout.separated);
+-    XCTAssertTrue(CGRectEqualToRect(layout.controls, CGRectMake(0, 422, 390, 422)));
+-    XCTAssertLessThanOrEqual(CGRectGetMaxY(layout.game), CGRectGetMinY(layout.controls));
++    XCTAssertEqualWithAccuracy(layout.game.size.width, 390, 0.5);
++    XCTAssertEqualWithAccuracy(layout.game.size.height, 390 * 9.0 / 16.0, 0.5, @"The picture keeps 16:9 at the window's width: %@", NSStringFromCGRect(layout.game));
++    XCTAssertEqualWithAccuracy(CGRectGetMinY(layout.game), 59, 0.5, @"It starts at the safe area's top: no bar above it");
++    XCTAssertEqualWithAccuracy(CGRectGetMaxY(layout.game), CGRectGetMinY(layout.controls), 0.5, @"No bar between the picture and the band");
++    XCTAssertEqualWithAccuracy(CGRectGetMinY(layout.controls), 59 + 390 * 9.0 / 16.0, 0.5);
++    XCTAssertEqualWithAccuracy(layout.controls.size.height, 844 - (59 + 390 * 9.0 / 16.0), 0.5);
++    XCTAssertEqualWithAccuracy(layout.companion.size.height, layout.controls.size.height, 0.5);
++    // The picture never takes more than half the window: an iPad's 4:3 keeps the midpoint it had, so the band keeps at least half
++    DmLayout ipad = dm_layout(CGRectMake(0, 0, 820, 1180), UIEdgeInsetsMake(24, 0, 20, 0), NO, CGRectNull, 1180.0 / 820.0);
++    XCTAssertTrue(ipad.separated);
++    XCTAssertEqualWithAccuracy(CGRectGetMinY(ipad.controls), 590, 0.5, @"An iPad keeps the midpoint: 4:3 needs 615 of the 820 across, over half the window");
++}
++
++- (void)testCompanionTakesTheBandUnderThePictureAndNoOtherLayoutHasOne {
++    // The pad floats over the band, so the panel is the whole band and is drawn under the keys: the same rectangle as the controls, not a part of it
++    DmLayout split = dm_layout(CGRectMake(0, 0, 390, 844), UIEdgeInsetsMake(59, 0, 34, 0), NO, CGRectNull, DM_PICTURE_16_9);
++    XCTAssertTrue(split.separated);
++    XCTAssertTrue(CGRectEqualToRect(split.companion, split.controls), @"The band is the pad's area: %@ against %@", NSStringFromCGRect(split.companion), NSStringFromCGRect(split.controls));
++    XCTAssertLessThanOrEqual(CGRectGetMaxY(split.game), CGRectGetMinY(split.companion), @"The picture stays above the band");
++    // A Duo's fold moves the band with the controls
++    DmLayout folded = dm_layout(CGRectMake(0, 0, 669, 951), UIEdgeInsetsMake(62, 0, 34, 0), NO, CGRectMake(0, 455.5, 669, 40), DM_PICTURE_16_9);
++    XCTAssertTrue(folded.separated);
++    XCTAssertTrue(CGRectEqualToRect(folded.companion, folded.controls));
++    XCTAssertEqualWithAccuracy(CGRectGetMinY(folded.companion), 495.5, 0.5, @"Below the fold's lower half");
++    // Landscape (the overlay) and a picture on a TV have no band
++    DmLayout overlay = dm_layout(CGRectMake(0, 0, 844, 390), UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
++    XCTAssertFalse(overlay.separated);
++    XCTAssertTrue(CGRectIsEmpty(overlay.companion));
++    DmLayout tv = dm_layout_pad_only(CGRectMake(0, 0, 390, 844));
++    XCTAssertFalse(tv.separated);
++    XCTAssertTrue(CGRectIsEmpty(tv.companion));
++}
++
++- (void)testProductionRootFollowsTheOrientationWithItsConsoleMode {
++    // A phone standing up is handheld, so the game's own touch screens (its software keyboard above all) take touches; lying down it returns to the mode it
++    // had. The harness stubs dm_set_opmode into a variable (DuoRuntimeStubs.m), so this reads the mode the front end asked for.
++    UIViewController *root = [self harnessRootViewController];
++    SEL follow = NSSelectorFromString(@"followOrientation:");
++    XCTAssertTrue([root respondsToSelector:follow], @"The front end switches the console mode by orientation");
++    NSMethodSignature *sig = [root methodSignatureForSelector:follow];
++    NSInvocation *call = [NSInvocation invocationWithMethodSignature:sig];
++    call.target = root; call.selector = follow;
++    CGRect standing = CGRectMake(0, 0, 390, 844), lying = CGRectMake(0, 0, 844, 390);
++    // The harness window stands up, so the app has already followed that orientation: settle it lying down and docked, the baseline the app starts from
++    [call setArgument:&lying atIndex:2]; [call invoke];
++    dm_set_opmode(1);
++    [call setArgument:&standing atIndex:2]; [call invoke];
++    XCTAssertEqual(dm_opmode(), 0, @"A phone standing up runs handheld: the game's keyboard takes touches");
++    [call setArgument:&lying atIndex:2]; [call invoke];
++    XCTAssertEqual(dm_opmode(), 1, @"Lying down it returns to the mode the player had");
++    // A choice made in the in-game menu while standing up is the one lying down returns to
++    [call setArgument:&standing atIndex:2]; [call invoke];
++    XCTAssertEqual(dm_opmode(), 0);
++    dm_set_opmode(1);   // the player docks it from the in-game menu while standing up
++    [call setArgument:&lying atIndex:2]; [call invoke];
++    XCTAssertEqual(dm_opmode(), 1, @"The player's docked choice while standing up is what lying down keeps");
++}
++
++- (void)testPlayerConsoleModeChosenWhileStandingUpSurvivesTheReturn {
++    // A phone standing up forces handheld, so a player who wants docked there picks it in the in-game menu; lying down must keep that choice, not the
++    // handheld it replaced. This is the case a baseline of docked hides: the mode held for the return would still be handheld.
++    UIViewController *root = [self harnessRootViewController];
++    SEL follow = NSSelectorFromString(@"followOrientation:");
++    NSInvocation *call = [NSInvocation invocationWithMethodSignature:[root methodSignatureForSelector:follow]];
++    call.target = root; call.selector = follow;
++    CGRect standing = CGRectMake(0, 0, 390, 844), lying = CGRectMake(0, 0, 844, 390);
++    dm_set_opmode(0);   // a player who was handheld lying down
++    [call setArgument:&lying atIndex:2]; [call invoke];
++    dm_set_opmode(0);
++    [call setArgument:&standing atIndex:2]; [call invoke];
++    XCTAssertEqual(dm_opmode(), 0, @"Standing up it stays handheld");
++    // The in-game menu's docked pick while standing up
++    XCTAssertTrue(dm_setting_live("DM_OPMODE", "1"));
++    XCTAssertEqual(dm_opmode(), 1);
++    [call setArgument:&lying atIndex:2]; [call invoke];
++    XCTAssertEqual(dm_opmode(), 1, @"Lying down keeps the player's docked pick, not the handheld it replaced");
++}
++
++- (void)testProductionRootPutsThePanelUnderThePadAndOutOfItsWay {
++    UIViewController *root = [self harnessRootViewController];
++    UIView *pad = [root valueForKey:@"pad"];
++    UIView *companion = [root valueForKey:@"companion"];
++    XCTAssertNotNil(companion, @"The front end keeps a view for the band");
++    XCTAssertEqual(companion.superview, root.view);
++    // The pad is above the panel: its keys and touches cover the panel, which the band's own background fills underneath
++    NSInteger padIndex = [root.view.subviews indexOfObjectIdenticalTo:pad];
++    NSInteger panelIndex = [root.view.subviews indexOfObjectIdenticalTo:companion];
++    XCTAssertGreaterThan(padIndex, panelIndex, @"The pad is added after the panel, so it floats over it");
++    // The panel takes no touch of its own: the pad owns the band's hit testing (a touch on no key falls through, as before)
++    XCTAssertFalse(companion.isUserInteractionEnabled);
++    [root.view layoutIfNeeded];
++    BOOL portrait = root.view.bounds.size.height > root.view.bounds.size.width;
++    XCTAssertEqual(companion.hidden, !portrait, @"The panel is shown only where a split gives it a band");
++    if (portrait) XCTAssertEqualWithAccuracy(CGRectGetMinY(companion.frame), CGRectGetMaxY([(UIView *)[root valueForKey:@"game"] frame]), 1.0,
++                                            @"The panel starts where the picture ends: %@", NSStringFromCGRect(companion.frame));
+ }
+ 
+ - (void)testPortraitControlsUseAnchoredGroupsWithASeparatedThreeDimensionalLeftPair {
+@@ -999,7 +1113,8 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     NSData *plist = [NSData dataWithContentsOfURL:[NSBundle.mainBundle URLForResource:@"Info" withExtension:@"plist"]];
+     NSDictionary *info = [NSPropertyListSerialization propertyListWithData:plist options:0 format:nil error:nil];
+     NSSet *landscape = [NSSet setWithArray:@[@"UIInterfaceOrientationLandscapeLeft", @"UIInterfaceOrientationLandscapeRight"]];
+-    XCTAssertEqualObjects([NSSet setWithArray:info[@"UISupportedInterfaceOrientations"]], landscape);
++    // The harness's own plist carries what the app's does, so a test that reads it reads the app's contract (test_orientation_policy.py holds both to it)
++    XCTAssertEqualObjects([NSSet setWithArray:info[@"UISupportedInterfaceOrientations"]], [landscape setByAddingObject:@"UIInterfaceOrientationPortrait"]);
+     NSSet *all = [landscape setByAddingObjectsFromSet:[NSSet setWithArray:@[@"UIInterfaceOrientationPortrait", @"UIInterfaceOrientationPortraitUpsideDown"]]];
+     XCTAssertEqualObjects([NSSet setWithArray:info[@"UISupportedInterfaceOrientations~ipad"]], all);
+     XCTAssertNil(info[@"UIRequiresFullScreen"]);
+diff --git a/dm/ios/tests/duo/project.yml b/dm/ios/tests/duo/project.yml
+index de177217..a06313f3 100644
+--- a/dm/ios/tests/duo/project.yml
++++ b/dm/ios/tests/duo/project.yml
+@@ -32,6 +32,7 @@ targets:
+         UIStatusBarHidden: true
+         UIViewControllerBasedStatusBarAppearance: false
+         UISupportedInterfaceOrientations:
++          - UIInterfaceOrientationPortrait
+           - UIInterfaceOrientationLandscapeLeft
+           - UIInterfaceOrientationLandscapeRight
+         UISupportedInterfaceOrientations~ipad:
+diff --git a/dm/ios/tests/test_orientation_policy.py b/dm/ios/tests/test_orientation_policy.py
+index b3d0652c..2879e96f 100644
+--- a/dm/ios/tests/test_orientation_policy.py
++++ b/dm/ios/tests/test_orientation_policy.py
+@@ -7,12 +7,13 @@ IOS = Path(__file__).resolve().parents[1]
+ 
+ 
+ class OrientationPolicyTests(unittest.TestCase):
+-    def test_phone_landscape_and_ipad_resizing(self):
++    def test_phone_portrait_landscape_and_ipad_resizing(self):
++        phone = {"UIInterfaceOrientationPortrait", "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"}
+         landscape = {"UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"}
+         all_orientations = landscape | {"UIInterfaceOrientationPortrait", "UIInterfaceOrientationPortraitUpsideDown"}
+         for project in (IOS / "project.yml", IOS / "tests/duo/project.yml"):
+             source = project.read_text()
+-            for key, expected in (("UISupportedInterfaceOrientations", landscape),
++            for key, expected in (("UISupportedInterfaceOrientations", phone),
+                                   ("UISupportedInterfaceOrientations~ipad", all_orientations)):
+                 with self.subTest(project=project.name, key=key):
+                     match = re.search(r"^        " + re.escape(key) + r":\n((?:          - .*\n)+)", source, re.MULTILINE)
+diff --git a/docs/playing.md b/docs/playing.md
+index 8d7ea0f7..b1fe9e44 100644
+--- a/docs/playing.md
++++ b/docs/playing.md
+@@ -14,7 +14,7 @@ In 3D, the right stick (the camera in most games) is not drawn: swipe on the rig
+ 
+ A connected game controller hides the touch controls, all but the gear, and keeps every button.
+ 
+-In portrait (an iPad, an iPhone Duo's inner screen) the picture sits above the controls; so it does on a Duo half folded, the picture on the upper half. An iPad game also runs in a window of any size (Stage Manager).
++In portrait (an iPhone, an iPad, an iPhone Duo's inner screen) the picture sits above the controls; so it does on a Duo half folded, the picture on the upper half. A phone standing up shows the 16:9 picture across the full width with no bars above or below it, and the controls get the rest of the screen, which is more than half of it; an iPad, whose picture is taller than 16:9, keeps half. A phone standing up also runs in handheld mode, so the game's own touch screens (its software keyboard among them) take touches; lying down it returns to the console mode it had. An iPad game also runs in a window of any size (Stage Manager).
+ 
+ ## Rumble
+ 
+diff --git a/docs/reference/rendering.md b/docs/reference/rendering.md
+index 93247c56..8dc473f5 100644
+--- a/docs/reference/rendering.md
++++ b/docs/reference/rendering.md
+@@ -2071,7 +2071,7 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
+ 
+ - **Symptom:** portrait gameplay overlaps the touch controls, touch coordinates land outside the game picture, or a TV's picture renders at 4K again after a layout pass.
+ - **Cause:** the front end assumed a landscape screen with the controls over the whole view, so its picture and touch geometry did not follow a portrait screen (an iPad, an iPhone Duo's inner display) or a Duo's fold. On iPadOS the deprecated `UIRequiresFullScreen` kept the game out of resizable windows, and a native rotation A/B on the iPhone Duo iOS 27.1 simulator showed that it also blocked upside-down portrait.
+-- **Fix:** `dm/ios/Sources/DmLayout.h` computes the picture and controls rectangles from the view's bounds, its safe area and UIKit's division region (`UIHingeInteraction`, iOS 27.1); front_ios.m lays the views out from them and DmGamepad.m its controls. Landscape keeps the overlay unless the hinge is half open over a horizontal division; portrait puts a fitted 16:9 picture above the controls, at the division or the midpoint. On a Duo in portrait only the top safe-area inset applies. Game touches map through the picture rectangle (with [Fill](../settings.md#picture), larger than the view), and a layout change releases held inputs. The phone's orientation list stays landscape (the Duo's inner display follows its bounds), the iPad's has all four and no `UIRequiresFullScreen`. While a TV shows the picture the phone uses the controls-only layout (`dm_layout_pad_only`). A connected gamepad hides both the touch controls and the gear in this layout. The drawable's scale is set in one place, `DmGameView layoutSubviews`: the screen's pixels, at most `maxPixelWidth` across, which the TV sets to 1920, so a later layout pass cannot undo the TV's 1080p cap.
++- **Fix:** `dm/ios/Sources/DmLayout.h` computes the picture, the band and the controls rectangles from the view's bounds, its safe area and UIKit's division region (`UIHingeInteraction`, iOS 27.1); front_ios.m lays the views out from them and DmGamepad.m its controls. Landscape keeps the overlay unless the hinge is half open over a horizontal division; portrait puts a fitted 16:9 picture above the controls, at the division or, with no fold, at the height the picture's own width asks for (never past the midpoint, so an iPad's taller picture keeps the midpoint split it had and the band keeps at least half the window). A phone standing up therefore shows the 16:9 picture with no bars above or below it: halving a 19.5:9 phone left 9:9.75, where nearly half of the picture's part was bars. On a Duo in portrait only the top safe-area inset applies; an ordinary phone in portrait keeps every inset. Game touches map through the picture rectangle (with [Fill](../settings.md#picture), larger than the view), and a layout change releases held inputs. The console mode follows the screen's orientation while no TV shows the picture (`followOrientation` in front_ios.m): a phone standing up goes handheld so the game's own touch screens take touches, and lying down it returns to the mode the player had, including a choice made in the in-game menu. The switch is the console mode change notification the game watches, so it follows while the game runs. The phone's and the iPad's orientation lists both have portrait (the iPad's all four, without `UIRequiresFullScreen`). The band under the picture is the pad's own area, and the front end keeps a panel view there, under the pad, for what the game's own screens cannot show. While a TV shows the picture the phone is all controls (`dm_layout_pad_only`). A connected gamepad hides both the touch controls and the gear in this layout. The drawable's scale is set in one place, `DmGameView layoutSubviews`: the screen's pixels, at most `maxPixelWidth` across, which the TV sets to 1920, so a later layout pass cannot undo the TV's 1080p cap.
+ - **Check:** the [Duo harness](../../dm/ios/tests/duo/README.md) tests layout, hit targets, touches, the in-game menu's live settings and the drawable cap in the Simulator with synthetic host state. A physical Duo was tested by the PR #683 author on their fork; full-game tests on a physical iPad and a Duo with this repository's build are open.
+ - **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md).
+ 
+diff --git a/docs/settings.md b/docs/settings.md
+index 5af76cf9..9216af8d 100644
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -87,7 +87,7 @@ iPhone and iPad. **Fit**, the default, shows the game's picture (16:9, or the ta
+ 
+ ### Picture shape
+ 
+-Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizons). **iPhone Duo screen (1.43:1)** renders a taller picture of the Duo's own shape: the sides of 16:9 with more above and below, and the HUD at the screen's edges. **16:9** is the Switch's picture. The taller picture has about a quarter more pixels, so it runs a little slower and warmer.
++Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizons). **iPhone Duo screen (1.43:1)** renders a taller picture of the Duo's own shape: the sides of 16:9 with more above and below, and the HUD at the screen's edges. **16:9** is the Switch's picture. The taller picture has about a quarter more pixels, so it runs a little slower and warmer. **Match screen** takes the shape the game is started in, which is 16:9 on a phone standing up: the picture there fills the width with no bars above or below it and the rest of the screen goes to the controls, so a taller picture would leave the controls less room. The choice only matters in landscape.
+ 
+ ### Frame-rate counter
+ 

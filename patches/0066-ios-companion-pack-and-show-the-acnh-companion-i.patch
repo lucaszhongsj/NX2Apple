@@ -1,0 +1,1797 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Mon, 16 Nov 2026 12:47:14 +0800
+Subject: [PATCH] ios/companion: pack and show the ACNH companion in a split's
+ band
+
+A profile with companion.json opts its game into Eden Duo's companion: the
+build derives the interface manifest from the vendored MSBT strings, bundles
+the profile's build-ID and input-gate rows with the component licenses, and
+defines DM_COMPANION for the Swift part. The renderer compiles into every app;
+without the condition its bridge answers NULL and the front end keeps its
+empty band, so an app for any other game shows nothing. gen_build.py passes
+the module's C++ and ObjC++ sources through.
+
+The iOS root puts the companion's hosting controller in the band a split gives
+it, with the pad floating over it, and the pad hands the band's non-key taps
+through (DmGamepad.m hitTest). front_run tells the guest-memory reader that
+the modules are loaded before the guest starts.
+
+The harness stands in an empty view for the Swift companion and checks that a
+tap on a clear part of the band reaches it.
+
+Upstream-Status: pending
+Reason: The ACNH companion: Eden Duo's reader and the band a phone standing up shows it in; nxnative carries it on feat/acnh-companion
+Issue: none yet: no upstream issue for the companion
+
+---
+ dm/games/01006F8002326000/companion.json      |  12 +
+ dm/host/companion_layout.h                    | 251 +++++
+ dm/ios/Sources/ACNHCompanion.swift            | 185 ++++
+ dm/ios/Sources/DmGamepad.m                    |   4 +-
+ dm/ios/Sources/DmIOS-Bridging-Header.h        |   4 +
+ dm/ios/Sources/EdenCompanion.swift            | 918 ++++++++++++++++++
+ dm/ios/Sources/front_ios.m                    |  20 +-
+ .../Sources/zh-Hans.lproj/Companion.strings   |  92 ++
+ dm/ios/tests/duo/Sources/DuoRuntimeStubs.m    |   7 +
+ dm/ios/tests/duo/Tests/DuoHarnessTests.m      |  21 +-
+ dm/ios/tools/build_ipa.sh                     |  14 +
+ dm/ios/tools/gen_build.py                     |   2 +-
+ dm/ios/tools/gen_companion.py                 |  68 ++
+ dm/third_party/eden_duo/NOTICES-nxnative.md   |   4 +
+ 14 files changed, 1593 insertions(+), 9 deletions(-)
+ create mode 100644 dm/games/01006F8002326000/companion.json
+ create mode 100644 dm/host/companion_layout.h
+ create mode 100644 dm/ios/Sources/ACNHCompanion.swift
+ create mode 100644 dm/ios/Sources/EdenCompanion.swift
+ create mode 100644 dm/ios/Sources/zh-Hans.lproj/Companion.strings
+ create mode 100644 dm/ios/tools/gen_companion.py
+
+diff --git a/dm/games/01006F8002326000/companion.json b/dm/games/01006F8002326000/companion.json
+new file mode 100644
+index 00000000..601cbc2f
+--- /dev/null
++++ b/dm/games/01006F8002326000/companion.json
+@@ -0,0 +1,12 @@
++{
++  "title_id": "01006F8002326000",
++  "ui": "acnh",
++  "layout": "portrait-split",
++  "write_builds": ["ff1d1c05670db6021c85b624a710b963"],
++  "input_gates": {
++    "pdrv.a": 1, "pdrv.b": 2, "pdrv.x": 4,
++    "pdrv.l": 64, "pdrv.r": 128, "pdrv.zl": 256,
++    "pdrv.left": 4096, "pdrv.up": 8192,
++    "pdrv.right": 16384, "pdrv.down": 32768
++  }
++}
+diff --git a/dm/host/companion_layout.h b/dm/host/companion_layout.h
+new file mode 100644
+index 00000000..27b52470
+--- /dev/null
++++ b/dm/host/companion_layout.h
+@@ -0,0 +1,251 @@
++// The full-size companion owns the lower screen; controls float above its content.
++#pragma once
++#include <CoreGraphics/CoreGraphics.h>
++#include <math.h>
++typedef struct { CGFloat left,right,bottom; } dm_companion_dock_insets;
++typedef struct { CGRect game,controls,panel,left,right; dm_companion_dock_insets dock; } dm_companion_layout;
++// Compact controls retain their own minimum column rather than borrowing space
++// from an independently fitted companion card.
++static inline CGFloat dm_companion_compact_fraction(CGFloat width) {
++    return isfinite(width) && width>0 ? fmin(1,fmax(0,(600-width)/160)):0;
++}
++static inline CGFloat dm_companion_rail_width(CGFloat width) {
++    if(!isfinite(width)||width<=0)return 0;
++    return fmin(width/3,fmin(128,fmax(68,width*.16)));
++}
++static inline CGFloat dm_companion_footer_gap(CGSize size) {
++    return fmin(12,size.height*.028);
++}
++// Rendering and controller placement share these physical columns. The body
++// keeps the manifest's aspect inside the centre; its background still bleeds to
++// the panel edges and the footer remains full width.
++typedef struct {
++    CGRect body,footer,nav_art,nav_controls,content,left,right;
++    CGFloat body_scale,nav_scale;
++    CGPoint body_offset,nav_offset;
++} dm_companion_surface_layout;
++static inline dm_companion_surface_layout dm_companion_surface_make_safe(CGSize size,int controls,dm_companion_dock_insets dock) {
++    dm_companion_surface_layout p={0};
++    if(!isfinite(size.width)||!isfinite(size.height)||size.width<=0||size.height<=0)return p;
++    CGFloat gap=dm_companion_footer_gap(size),bottom=fmin(size.height,fmax(0,dock.bottom));
++    CGFloat inset=fmax(fmin(16,size.width*.026),fmin(22,bottom*.60));
++    CGFloat left=fmin(size.width,fmax(inset,dock.left));
++    CGFloat right=fmin(size.width-left,fmax(inset,dock.right));
++    CGFloat nav_width=size.width-left-right;
++    // The authored icons, labels and selection art occupy y=975..1073.
++    // Centre that strip in a compact plate and reserve only its bottom edge
++    // for gestures, with side clearance for the window's curved corners.
++    CGFloat art_height=98,padding=fmin(11,fmax(4,bottom*.31));
++    CGFloat gesture_edge=fmin(bottom,padding),target_scale=fmin(.62,nav_width/1240);
++    CGFloat h=fmin(size.height-gap,fmax(44+gesture_edge,art_height*target_scale+2*padding));
++    CGFloat rail=controls?dm_companion_rail_width(size.width):0;
++    CGFloat footer_y=size.height-h;
++    p.body=CGRectMake(0,0,size.width,fmax(0,footer_y-gap));
++    p.footer=CGRectMake(0,footer_y,size.width,h);
++    p.nav_scale=fmax(.001,fmin(target_scale,(h-2*padding)/art_height));
++    CGFloat nav_w=fmin(nav_width,1240*p.nav_scale),nav_h=fmin(h,art_height*p.nav_scale);
++    CGFloat nav_x=left+(nav_width-nav_w)/2;
++    p.nav_art=CGRectMake(nav_x,footer_y+(h-nav_h)/2,nav_w,nav_h);
++    p.nav_controls=CGRectMake(nav_x,footer_y,nav_w,fmax(0,h-gesture_edge));
++    p.nav_offset=CGPointMake(nav_x,CGRectGetMidY(p.nav_art)-1024*p.nav_scale);
++    p.content=CGRectMake(rail,0,fmax(1,size.width-2*rail),p.body.size.height);
++    CGFloat edge=fmin(10,rail*.15);
++    p.left=CGRectMake(edge,0,fmax(0,rail-edge),p.body.size.height);p.right=CGRectMake(size.width-rail,0,fmax(0,rail-edge),p.body.size.height);
++    p.body_scale=fmax(.001,fmin(p.content.size.width/1240,p.content.size.height/968));
++    p.body_offset=CGPointMake(CGRectGetMidX(p.content)-620*p.body_scale,CGRectGetMidY(p.content)-484*p.body_scale);
++    return p;
++}
++static inline dm_companion_surface_layout dm_companion_surface_make(CGSize size,int controls) {
++    return dm_companion_surface_make_safe(size,controls,(dm_companion_dock_insets){0});
++}
++static inline void dm_companion_place_controls(dm_companion_layout *layout,CGRect safe,int touch) {
++    CGRect panel=layout->panel;
++    layout->dock=(dm_companion_dock_insets){
++        fmax(0,CGRectGetMinX(safe)-CGRectGetMinX(panel)),
++        fmax(0,CGRectGetMaxX(panel)-CGRectGetMaxX(safe)),
++        fmax(0,CGRectGetMaxY(panel)-CGRectGetMaxY(safe))
++    };
++    if(!touch)return;
++    dm_companion_surface_layout surface=dm_companion_surface_make_safe(panel.size,1,layout->dock);
++    CGRect body=CGRectOffset(surface.body,panel.origin.x,panel.origin.y);
++    CGRect lower=CGRectIntersection(body,safe);
++    if(CGRectIsNull(lower)||CGRectIsEmpty(lower))return;
++    layout->controls=lower;
++    CGFloat rail=dm_companion_rail_width(lower.size.width);
++    layout->left=CGRectMake(lower.origin.x,lower.origin.y,rail,lower.size.height);
++    layout->right=CGRectMake(CGRectGetMaxX(lower)-rail,lower.origin.y,rail,lower.size.height);
++}
++static inline dm_companion_layout dm_companion_screen_layout(CGRect bounds, CGRect safe, int portrait, int touch) {
++    dm_companion_layout r={0};
++    if(!isfinite(safe.size.width) || !isfinite(safe.size.height) || safe.size.width<=0 || safe.size.height<=0)return r;
++    CGFloat w=safe.size.width,h=safe.size.height;
++    if(!portrait){
++        w=fmin(w,h*16.0/9.0);h=w*9.0/16.0;
++        r.game=CGRectMake(safe.origin.x+(safe.size.width-w)/2,safe.origin.y+(safe.size.height-h)/2,w,h);
++        return r;
++    }
++    h=fmin(safe.size.height*0.48,w*9.0/16.0);w=h*16.0/9.0;
++    r.game=CGRectMake(safe.origin.x+(safe.size.width-w)/2,safe.origin.y,w,h);
++    r.panel=CGRectMake(bounds.origin.x,CGRectGetMaxY(r.game),bounds.size.width,CGRectGetMaxY(bounds)-CGRectGetMaxY(r.game));
++    dm_companion_place_controls(&r,safe,touch);
++    return r;
++}
++// Tablets and expanded folding-phone windows split the canvas equally. Foreground
++// controls stay inside each asymmetric safe edge; backgrounds reach the edge.
++static inline dm_companion_layout dm_companion_fold_layout(CGRect bounds,CGRect safe,int split,int touch) {
++    dm_companion_layout r={0};r.game=bounds;
++    if(!split)return r;
++    r.game.size.height=bounds.size.height/2;
++    r.panel=CGRectMake(bounds.origin.x,CGRectGetMaxY(r.game),bounds.size.width,bounds.size.height-r.game.size.height);
++    dm_companion_place_controls(&r,safe,touch);
++    return r;
++}
++// UIKit drawing, input hit testing and geometry validation consume the same positions.
++enum { DM_COMPANION_DPAD_RADIUS=43, DM_COMPANION_DPAD_ARM_WIDTH=17 };
++typedef struct {
++    CGRect left,right;
++    CGPoint stick,dpad,face,right_stick,shoulder[4],click[2],menu[2],swap;
++    CGFloat unit,face_gap,face_x_scale,face_y_scale,face_r,stick_r,dpad_r,right_r,shoulder_r,click_r,swap_r,knob_r;
++    CGFloat stick_hit_r,right_hit_r;
++    CGFloat face_hit_r,dpad_hit_r,shoulder_hit_r,click_hit_r;
++    CGSize menu_size,menu_hit_size;
++} dm_companion_pad_layout;
++static inline CGRect dm_companion_pad_disc(CGPoint p,CGFloat radius) {
++    return CGRectMake(p.x-radius,p.y-radius,2*radius,2*radius);
++}
++static inline CGFloat dm_companion_pad_stick_extent(dm_companion_pad_layout p,int right) {
++    return right?p.right_hit_r:p.stick_hit_r;
++}
++static inline CGFloat dm_companion_pad_shoulder_extent(dm_companion_pad_layout p) {
++    return p.shoulder_hit_r*(1.45/1.35);
++}
++static inline CGRect dm_companion_pad_face_box(dm_companion_pad_layout p) {
++    CGFloat extent=p.face_gap+p.face_hit_r,x=extent*p.face_x_scale,y=extent*p.face_y_scale;
++    return CGRectMake(p.face.x-x,p.face.y-y,2*x,2*y);
++}
++static inline CGRect dm_companion_pad_region(dm_companion_pad_layout p,int right) {
++    CGRect rail=right?p.right:p.left;
++    CGFloat margin=8-6*dm_companion_compact_fraction(CGRectGetMaxX(p.right));
++    CGFloat vertical=fmax(0,fmin(4,(rail.size.height*.09-22+7.2*p.unit)/2));
++    return CGRectInset(rail,fmin(margin,rail.size.width*.08),vertical);
++}
++static inline CGRect dm_companion_pad_face_region(dm_companion_pad_layout p) {
++    CGRect region=dm_companion_pad_region(p,1);
++    CGFloat inset=CGRectGetMinX(region)-CGRectGetMinX(p.right);
++    // The diamond can use part of the rail padding while retaining a clear edge.
++    return CGRectInset(region,-fmax(0,inset-fmax(1.5,inset*.45)),0);
++}
++static inline CGRect dm_companion_pad_menu_hit(dm_companion_pad_layout p,int right) {
++    CGFloat w=p.menu_hit_size.width,h=p.menu_hit_size.height;
++    return CGRectMake(p.menu[right].x-w/2,p.menu[right].y-h/2,w,h);
++}
++static inline CGRect dm_companion_pad_group(dm_companion_pad_layout p,int right) {
++    CGRect box=right?dm_companion_pad_face_box(p):dm_companion_pad_disc(p.stick,dm_companion_pad_stick_extent(p,0));
++    box=CGRectUnion(box,dm_companion_pad_disc(right?p.right_stick:p.dpad,right?dm_companion_pad_stick_extent(p,1):p.dpad_hit_r));
++    for(int i=right?2:0;i<(right?4:2);i++)box=CGRectUnion(box,dm_companion_pad_disc(p.shoulder[i],dm_companion_pad_shoulder_extent(p)));
++    box=CGRectUnion(box,dm_companion_pad_disc(p.click[right],p.click_hit_r));
++    box=CGRectUnion(box,dm_companion_pad_menu_hit(p,right));
++    if(!right)box=CGRectUnion(box,dm_companion_pad_disc(p.swap,fmax(22,p.swap_r*1.6)));
++    return box;
++}
++static inline void dm_companion_pad_center(dm_companion_pad_layout *p) {
++    for(int right=0;right<2;right++){
++        CGRect box=dm_companion_pad_group(*p,right),rail=right?p->right:p->left;
++        CGFloat dx=CGRectGetMidX(rail)-CGRectGetMidX(box),dy=CGRectGetMidY(rail)-CGRectGetMidY(box);
++        CGPoint *points[]={right?&p->face:&p->stick,right?&p->right_stick:&p->dpad,&p->shoulder[right*2],&p->shoulder[right*2+1],&p->click[right],&p->menu[right],&p->swap};
++        for(int i=0;i<(right?6:7);i++){points[i]->x+=dx;points[i]->y+=dy;}
++    }
++}
++static inline CGFloat dm_companion_pad_art_size(CGFloat requested,CGFloat fitted,CGFloat limit,CGFloat growth) {
++    return fmin(requested,fitted+(limit-fitted)*growth);
++}
++static inline dm_companion_pad_layout dm_companion_pad_geometry_regions(CGSize size,CGFloat scale,CGRect left,CGRect right) {
++    dm_companion_pad_layout p={0};
++    CGFloat w=size.width,h=size.height;
++    if(!isfinite(w)||!isfinite(h)||w<=0||h<=0)return p;
++    if(CGRectIsEmpty(left)||CGRectIsEmpty(right))return p;
++    CGFloat compact=dm_companion_compact_fraction(w),rail=fmin(left.size.width,right.size.width);
++    h=fmin(left.size.height,right.size.height);
++    if(!isfinite(scale))scale=1;
++    scale=fmin(1.35,fmax(.65,scale));
++    CGFloat margin=fmin(8-6*compact,rail*.08),vertical=fmin(4,h*.02);
++    // Reserve the moving knob, generous hit regions and shoulder pair before
++    // centring. A requested scale cannot consume the companion's middle column.
++    CGFloat width=fmax(140,2*(42+1.25*(24+2*compact)));
++    CGFloat fit=fmin((rail-2*margin)/width,((.58-.06*compact)*rail-2*margin)/(2*24*1.45));
++    fit=fmin(fit,(h*.09-2*vertical)/(18.8+6*compact));
++    CGFloat pitch=h*.17;
++    // The +/- row sits between the upper and lower control groups. Protect
++    // its full 44-point minimum target from both groups on short surfaces.
++    CGFloat face_extent=42+1.25*(24+2*compact),menu_half=18+6*compact+8;
++    fit=fmin(fit,(pitch-28)/face_extent);
++    fit=fmin(fit,(pitch-6)/(face_extent+menu_half));
++    // The lower stick and its click key use the same row pitch as the
++    // upper stick, menu and D-pad. Leave room for both full touch targets.
++    fit=fmin(fit,(pitch-6)/(46*1.4+1.35*(17+5*compact)));
++    CGFloat nominal=fmin(1.08,fmin(rail/(175.0-31*compact),h/550.0));
++    p.unit=fmax(0,fmin(fit,scale*nominal));
++    // Keep the rail reservations fitted. Each control uses the available
++    // space around its artwork progressively across the full slider range.
++    CGFloat art_unit=fmax(0,fmin(fit,nominal))*scale;
++    CGFloat growth=fmax(0,(scale-1)/.35);
++    p.stick_hit_r=50*p.unit*1.4;p.right_hit_r=46*p.unit*1.4;
++    p.left=left;p.right=right;
++    p.stick=CGPointMake(CGRectGetMidX(left),left.origin.y+2*pitch);p.face=CGPointMake(CGRectGetMidX(right),right.origin.y+2*pitch);
++    p.dpad=CGPointMake(CGRectGetMidX(left),left.origin.y+4*pitch);p.right_stick=CGPointMake(CGRectGetMidX(right),right.origin.y+4*pitch);
++    p.shoulder[0]=CGPointMake(left.origin.x+left.size.width*(.29-.03*compact),left.origin.y+42*p.unit);p.shoulder[1]=CGPointMake(left.origin.x+left.size.width*(.71+.03*compact),left.origin.y+42*p.unit);
++    p.shoulder[2]=CGPointMake(CGRectGetMaxX(right)-right.size.width*(.29-.03*compact),right.origin.y+42*p.unit);p.shoulder[3]=CGPointMake(CGRectGetMaxX(right)-right.size.width*(.71+.03*compact),right.origin.y+42*p.unit);
++    p.click[0]=CGPointMake(CGRectGetMidX(left),left.origin.y+5*pitch);p.click[1]=CGPointMake(CGRectGetMidX(right),right.origin.y+5*pitch);
++    p.swap=CGPointMake(CGRectGetMidX(left),left.origin.y+h*.18);
++    // Open the diamond slightly where needed to keep adjacent outlines apart.
++    // Its outer hit extent stays the same as the fitted diamond.
++    CGFloat face_radius=24+2*compact,fitted_face=face_radius*p.unit,face_gap=42*p.unit;
++    CGFloat face_box=face_gap+1.25*fitted_face,clearance=fmin(1.5,6*p.unit);
++    CGFloat face_padding=.5*clearance+2*p.unit; // retain a small overlap for diagonal presses
++    CGFloat face_limit=(face_box-M_SQRT1_2*clearance-face_padding)/(1+M_SQRT2);
++    p.face_gap=face_gap+growth*(face_box-face_limit-face_padding-face_gap);
++    p.face_r=dm_companion_pad_art_size(face_radius*art_unit,fitted_face,face_limit,growth);
++    p.face_hit_r=face_box-p.face_gap;
++    CGFloat face_half_width=CGRectGetWidth(dm_companion_pad_face_region(p))/2;
++    p.face_x_scale=face_box>0 ? fmax(1,fmin(1.12,face_half_width/face_box)) : 1;
++    p.stick_r=50*art_unit;p.right_r=46*art_unit;p.knob_r=30*art_unit;
++    CGFloat dpad_radius=DM_COMPANION_DPAD_RADIUS;
++    p.dpad_hit_r=dpad_radius*1.3*p.unit;
++    // Include the diagonal distance to the end of a D-pad arm.
++    p.dpad_r=dm_companion_pad_art_size(dpad_radius*art_unit,dpad_radius*p.unit,
++                                      p.dpad_hit_r/hypot(1,DM_COMPANION_DPAD_ARM_WIDTH/dpad_radius),growth);
++    // The diagonally angled teardrop tip stays inside the old shoulder box.
++    p.shoulder_hit_r=24*p.unit*1.35;p.shoulder_r=24*art_unit;
++    CGFloat click_radius=17+5*compact;
++    p.click_hit_r=click_radius*p.unit*1.35;p.click_r=click_radius*art_unit;
++    p.swap_r=(15+5*compact)*p.unit;
++    CGFloat menu_w=50+14*compact,menu_h=36+12*compact;
++    p.menu_hit_size=CGSizeMake(fmax(44,(menu_w+16)*p.unit),fmax(44,(menu_h+16)*p.unit));
++    CGFloat menu_limit=fmin(p.menu_hit_size.width/menu_w,p.menu_hit_size.height/menu_h);
++    CGFloat menu_unit=dm_companion_pad_art_size(art_unit,p.unit,menu_limit,growth);
++    p.menu_size=CGSizeMake(menu_w*menu_unit,menu_h*menu_unit);
++    p.menu[0]=CGPointMake(CGRectGetMidX(left),left.origin.y+3*pitch);p.menu[1]=CGPointMake(CGRectGetMidX(right),right.origin.y+3*pitch);
++    // Stretch the diamond vertically into the free space between the shoulders
++    // and +, independently of the horizontal clearance inside the right rail.
++    CGFloat face_top=p.shoulder[2].y+dm_companion_pad_shoulder_extent(p)+6;
++    CGFloat face_bottom=CGRectGetMinY(dm_companion_pad_menu_hit(p,1))-6;
++    p.face_y_scale=1;
++    if(face_box>0 && face_bottom-face_top>2*face_box){
++        p.face_y_scale=fmin(1.35,(face_bottom-face_top)/(2*face_box));
++        CGFloat extent=face_box*p.face_y_scale;
++        p.face.y=fmin(face_bottom-extent,fmax(face_top+extent,p.face.y));
++    }
++    dm_companion_pad_center(&p);return p;
++}
++static inline dm_companion_pad_layout dm_companion_pad_geometry_scaled(CGSize size,CGFloat scale) {
++    CGFloat rail=dm_companion_rail_width(size.width),edge=fmin(10,rail*.15);
++    return dm_companion_pad_geometry_regions(size,scale,CGRectMake(edge,0,rail-edge,size.height),CGRectMake(size.width-rail,0,rail-edge,size.height));
++}
++static inline dm_companion_pad_layout dm_companion_pad_geometry(CGSize size) {
++    return dm_companion_pad_geometry_scaled(size,1);
++}
++
++static inline int dm_companion_pad_contains(CGSize size,CGPoint point) {
++    dm_companion_pad_layout p=dm_companion_pad_geometry(size);
++    return CGRectContainsPoint(p.left,point) || CGRectContainsPoint(p.right,point);
++}
+diff --git a/dm/ios/Sources/ACNHCompanion.swift b/dm/ios/Sources/ACNHCompanion.swift
+new file mode 100644
+index 00000000..4ac9a609
+--- /dev/null
++++ b/dm/ios/Sources/ACNHCompanion.swift
+@@ -0,0 +1,185 @@
++// Native Apple presentation of Eden Duo's live ACNH module outputs.
++import SwiftUI
++import Combine
++import CoreGraphics
++#if os(iOS)
++import UIKit
++#endif
++
++func companionText(_ key: String) -> String {
++    var bundle = Bundle.main
++    let language = ProcessInfo.processInfo.environment["DM_LANG"] ?? (bundle.object(forInfoDictionaryKey: "DMLanguage") as? String ?? "")
++    if language.hasPrefix("zh"), let path = bundle.path(forResource: "zh-Hans", ofType: "lproj"), let translated = Bundle(path: path) { bundle = translated }
++    return bundle.localizedString(forKey: key, value: key, table: "Companion")
++}
++enum CompanionPage: Int, CaseIterable {
++    case map = 1, bag, critters, diy, today, phone
++    var title: String { companionText(["Map", "Pockets", "Critterpedia", "DIY", "Today", "NookPhone"][rawValue - 1]) }
++    var symbol: String { ["map", "bag", "fish", "hammer", "sun.max", "apps.iphone"][rawValue - 1] }
++}
++struct CompanionPixels { let data: Data; let width: Int; let height: Int }
++struct CompanionMarker: Identifiable {
++    let id: String
++    let key: String
++    let x: Double
++    let y: Double
++    let box: Double
++}
++@MainActor final class CompanionModel: ObservableObject {
++    typealias Reader = () -> [String: Any]
++    typealias Sender = (String, Int64) -> Void
++    typealias ImageLoader = (String, @escaping (Data?, Int, Int) -> Void) -> Void
++    @Published var values: [String: Any] = [:]
++    @Published var page = CompanionPage.map
++    @Published var imageEpoch = 0
++    @Published var islandName = ""
++    @Published var controlsHidden = false
++    @Published var externalController = false
++    @Published var dockInsets = EdgeInsets()
++    @Published private(set) var presented = true
++    var uiActivity: ((Int, Bool) -> Void)?
++    private var nativeActivity = false
++    private let read: Reader
++    private let send: Sender
++    let load: ImageLoader
++    private var timer: Timer?
++    private var interactionSamples: AnyCancellable?
++#if DM_COMPANION
++    private let native: DMCompanion?
++#else
++    private let native: AnyObject? = nil   // a build without the companion module has no native engine; tests inject reader / sender / images
++#endif
++    init(reader: Reader? = nil, sender: Sender? = nil, images: ImageLoader? = nil) {
++#if DM_COMPANION
++        let engine = reader == nil ? DMCompanion.shared() : nil
++        native = engine
++        read = reader ?? { engine?.snapshot as? [String: Any] ?? [:] }
++        send = sender ?? { name, value in engine?.action(name, argument: value) }
++        load = images ?? { key, completion in
++            guard let engine else { completion(nil, 0, 0); return }
++            engine.image(key) { data, w, h in completion(data, Int(w), Int(h)) }
++        }
++        if let engine {
++            interactionSamples = NotificationCenter.default.publisher(for: Notification.Name("DmCompanionInteractionSampled"), object: engine)
++                .sink { [weak self] _ in Task { @MainActor in self?.poll() } }
++        }
++        engine?.start()
++#else
++        read = reader ?? { [:] }
++        send = sender ?? { _, _ in }
++        load = images ?? { _, completion in completion(nil, 0, 0) }
++#endif
++        poll()
++        schedulePolling()
++    }
++    private func schedulePolling() {
++        timer?.invalidate();timer=nil
++        guard presented else { return }
++        let interval:TimeInterval = [.map,.bag,.phone].contains(page) ? 0.2 : 0.5
++        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in Task { @MainActor in self?.poll() } }
++        if let timer { RunLoop.main.add(timer, forMode: .common) }
++    }
++    deinit { timer?.invalidate() }
++    func poll() {
++        guard presented else { return }
++        let next = read()
++        if !(next as NSDictionary).isEqual(to: values) { values = next }
++        let name=text("island.name")
++        if !name.isEmpty && name != islandName { islandName = name }
++        updateNativeActivity()
++    }
++    func visible(_ value: Bool) {
++        if !value && page == .bag { action("bag_cancel", 0) }
++        presented=value
++        #if DM_COMPANION
++        native?.setVisible(value)
++        #endif
++        schedulePolling();if value {poll()}
++    }
++    func setPresentation(controlsHidden: Bool, physicalController: Bool, presented: Bool) {
++        if self.controlsHidden != controlsHidden { self.controlsHidden = controlsHidden }
++        if externalController != physicalController { externalController = physicalController }
++        // The root controller reports presentation independently of SwiftUI appearance.
++        // Route transitions through the owner of polling and native visibility.
++        if self.presented != presented { visible(presented) }
++    }
++    func select(_ next: CompanionPage) { if page == .bag && next != .bag { action("bag_cancel", 0) }; page = next; updateNativeActivity(); action("ui_open", next.rawValue);schedulePolling();poll() }
++    func updateNativeActivity(force: Bool = false) {
++        let busy = page == .bag && (number("bag.native.open") != 0 || number("bag.busy") != 0)
++            || page == .phone && (values["pdrv.idle"] as? NSNumber)?.intValue == 0
++        if force || busy != nativeActivity {nativeActivity=busy;uiActivity?(4,busy)}
++    }
++    func action(_ name: String, _ value: Int) { send(name, Int64(value)) }
++    func pocketToken(_ slot: Int) -> String { text("bag.\(slot).token") }
++    private func validToken(_ token: String) -> Bool { token.utf8.count == 16 && token.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) } }
++    func movePocket(from: Int, to: Int, expected: String) -> Bool {
++        let fresh = read()
++        let slots = min(40, max(0, (fresh["bag.slots"] as? NSNumber)?.intValue ?? 0))
++        guard from >= 0, to >= 0, from < slots, to < slots,
++              (fresh["bag.can_write"] as? NSNumber)?.boolValue == true,
++              (fresh["bag.busy"] as? NSNumber)?.boolValue != true,
++              validToken(expected), fresh["bag.\(from).token"] as? String == expected,
++              let target = fresh["bag.\(to).token"] as? String, validToken(target) else { return false }
++        send("bag_move_checked_" + expected + "_" + target, Int64(from * 64 + to));return true
++    }
++    func usePocket(_ slot: Int) {
++        let token = pocketToken(slot);guard slot >= 0, slot < count("bag.slots", max: 40), number("bag.can_use") != 0, validToken(token) else { return }
++        send("bag_use_" + token, Int64(slot))
++    }
++    func pocketCommand(_ index: Int) {
++        let slot = number("bag.native.slot"), token = text("bag.native.token")
++        guard number("bag.native.open") != 0, number("bag.busy") == 0, slot >= 0, slot < 40, index >= 0, index < count("bag.native.count", max: 7), validToken(token) else { return }
++        send("bag_command_\(slot)_" + token, Int64(number("bag.native.\(index).id") * 8 + index))
++    }
++    func text(_ key: String, _ fallback: String = "") -> String {
++        let value = values[key] as? String ?? fallback
++        // The native text sits beside decoded app/item icons. Nintendo's private icon
++        // codepoints have no glyph in the system font and must not become empty squares.
++        return String(String.UnicodeScalarView(value.unicodeScalars.filter { $0.properties.generalCategory != .privateUse }))
++    }
++    func number(_ key: String) -> Int { (values[key] as? NSNumber)?.intValue ?? 0 }
++    func decimal(_ key: String) -> Double { (values[key] as? NSNumber)?.doubleValue ?? 0 }
++    func count(_ key: String, max limit: Int = 1000) -> Int { min(max(0, number(key)), limit) }
++    var ready: Bool { number("acnh.ready") != 0 }
++    var turnipPrice: Int {
++        guard let slot = values["kabu.now"] as? NSNumber else { return 0 }
++        if slot.intValue < 0 { return max(0, number("kabu.sun")) }
++        return slot.intValue < 12 ? max(0, number("kabu.\(slot.intValue)")) : 0
++    }
++    func questMiles(_ index: Int) -> Int {
++        let prefix = "nmp.\(index)."
++        let multiplier = number(prefix + "x5") != 0 ? 5 : text(prefix + "card").contains("&bonus=1") ? 2 : 1
++        return number(prefix + "miles") * multiplier
++    }
++    var markers: [CompanionMarker] {
++        values.keys.filter { $0.hasPrefix("map.ib.") && $0.hasSuffix(".k0") }.sorted().compactMap { key in
++            let stem = String(key.dropLast(2))
++            guard let image = values[key] as? String, !image.isEmpty else { return nil }
++            let parts = key.split(separator: ".")
++            return CompanionMarker(id: key, key: image, x: decimal(stem + "x") / 10, y: decimal(stem + "y") / 10, box: parts.count > 2 ? Double(parts[2]) ?? 64 : 64)
++        }
++    }
++}
++
++struct ACNHCompanionView: View {
++    @ObservedObject var model: CompanionModel
++    var body: some View { EdenCompanionView(model: model) }
++}
++
++#if os(iOS)
++// The front end embeds this hosting controller's view as the band under the picture (front_ios.m), with the touch pad floating above it. It inherits the
++// game root's orientation policy; no canvas rotation is needed: the view is laid out by the root, not presented full screen. NULL for a game whose app
++// defines no DM_COMPANION (build_ipa.sh defines it only where the profile has companion.json), which keeps the front end's empty band.
++@MainActor @_cdecl("dm_companion_view_controller")
++public func dmCompanionViewController() -> UnsafeMutableRawPointer? {
++#if DM_COMPANION
++    let model = CompanionModel()
++    let controller = DmHostingController(rootView: ACNHCompanionView(model: model))
++    controller.view.backgroundColor = .clear
++    controller.view.clipsToBounds = true
++    return Unmanaged.passRetained(controller).toOpaque()
++#else
++    return nil
++#endif
++}
++#endif
+diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
+index 406eddea..d1bd0374 100644
+--- a/dm/ios/Sources/DmGamepad.m
++++ b/dm/ios/Sources/DmGamepad.m
+@@ -436,7 +436,9 @@ int front_web_touch(void);
+ - (BOOL)reduceMotionEnabled { return UIAccessibilityIsReduceMotionEnabled(); }
+ - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
+     UIView *v = [super hitTest:p withEvent:e];
+-    if (v == self && [self webTouchActive] && ![self controlAt:p]) {
++    if (v != self) return v;   // a key or the menu button took it
++    if (_layout.separated && CGRectContainsPoint(_layout.controls, p) && ![self controlAt:p]) return nil;   // the companion's view below takes the tap (tabs, item slots)
++    if ([self webTouchActive] && ![self controlAt:p]) {   // an offline HTML page over the picture
+         if (_padOff && !_layout.onTV && e && e.type == UIEventTypeTouches) [self wakeMenu];
+         return nil;
+     }
+diff --git a/dm/ios/Sources/DmIOS-Bridging-Header.h b/dm/ios/Sources/DmIOS-Bridging-Header.h
+index 02c292b5..ea0d407a 100644
+--- a/dm/ios/Sources/DmIOS-Bridging-Header.h
++++ b/dm/ios/Sources/DmIOS-Bridging-Header.h
+@@ -7,3 +7,7 @@
+ // main.m: set when the game data found is an old shard archive (romfs.idx), which is no longer read. The sentence names the
+ // action (re-send the game data as romfs.img from the launcher), or NULL. The launcher's Game data section shows it.
+ const char *dm_old_archive_message(void);
++
++// The optional portrait companion's native engine and its C layout helpers; Swift reaches them only under the DM_COMPANION compilation condition.
++#import "companion_apple.h"
++#include "companion_layout.h"
+diff --git a/dm/ios/Sources/EdenCompanion.swift b/dm/ios/Sources/EdenCompanion.swift
+new file mode 100644
+index 00000000..c80da32a
+--- /dev/null
++++ b/dm/ios/Sources/EdenCompanion.swift
+@@ -0,0 +1,918 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Apple renderer for Eden Duo's original, data-driven ACNH companion interface.
++// The manifest is vendored with its provenance; images and fonts come from the user's RomFS.
++import SwiftUI
++import Combine
++
++indirect enum EdenExpression {
++    case number(Double), key(String), unary(String, EdenExpression)
++    case binary(String, EdenExpression, EdenExpression), choose(EdenExpression, EdenExpression, EdenExpression)
++    case call(String, [EdenExpression])
++    func evaluate(_ get: (String) -> Double) -> Double {
++        switch self {
++        case .number(let n): return n
++        case .key(let k): return get(k)
++        case .unary(let op, let a): let x=a.evaluate(get);return op=="!" ? (x==0 ? 1:0) : op=="-" ? -x:x
++        case .choose(let c,let a,let b):return (c.evaluate(get) != 0 ? a:b).evaluate(get)
++        case .binary(let op,let a,let b):
++            let x=a.evaluate(get)
++            if op=="&&" && x==0{return 0};if op=="||" && x != 0{return 1}
++            let y=b.evaluate(get)
++            switch op {
++            case "+":return x+y;case "-":return x-y;case "*":return x*y
++            case "/":return y==0 ? 0:x/y;case "%":return y==0 ? 0:x.truncatingRemainder(dividingBy:y)
++            case "==":return x==y ? 1:0;case "!=":return x != y ? 1:0
++            case "<":return x<y ? 1:0;case ">":return x>y ? 1:0;case "<=":return x<=y ? 1:0;case ">=":return x>=y ? 1:0
++            case "&&":return y != 0 ? 1:0;case "||":return y != 0 ? 1:0;default:return 0
++            }
++        case .call(let name,let args):
++            let a=args.map{$0.evaluate(get)}
++            switch name {case "min":return a.min() ?? 0;case "max":return a.max() ?? 0;case "abs":return abs(a.first ?? 0)
++            case "floor":return floor(a.first ?? 0);case "round":return (a.first ?? 0).rounded()
++            case "clamp":return a.count==3 ? min(max(a[0],a[1]),a[2]):0;default:return 0}
++        }
++    }
++    static func parse(_ text: String) -> EdenExpression { var p=EdenParser(text);return p.expression() }
++}
++private struct EdenParser {
++    var tokens:[String]=[],index=0
++    init(_ source:String) {
++        let a=Array(source);var i=0
++        while i<a.count {
++            let c=a[i];if c.isWhitespace{i+=1;continue}
++            if c=="'" || c=="\"" {let q=c;i+=1;let start=i;while i<a.count && a[i] != q{i+=1};tokens.append("'"+String(a[start..<i]));if i<a.count{i+=1};continue}
++            if c.isNumber || (c=="." && i+1<a.count && a[i+1].isNumber) {
++                let start=i;i+=1;while i<a.count && (a[i].isNumber || a[i]=="."){i+=1};tokens.append(String(a[start..<i]));continue
++            }
++            if c.isLetter || c=="_" || c=="@" {
++                let start=i;i+=1;while i<a.count && (a[i].isLetter || a[i].isNumber || a[i]=="_" || a[i]=="."){i+=1};tokens.append(String(a[start..<i]));continue
++            }
++            if i+1<a.count {let op=String(a[i...i+1]);if ["&&","||","==","!=","<=",">="].contains(op){tokens.append(op);i+=2;continue}}
++            tokens.append(String(c));i+=1
++        }
++    }
++    var peek:String {index<tokens.count ? tokens[index]:""}
++    mutating func take()->String {let t=peek;if index<tokens.count{index+=1};return t}
++    func priority(_ op:String)->Int {switch op {case "||":return 1;case "&&":return 2;case "==","!=":return 3;case "<",">","<=",">=":return 4;case "+","-":return 5;case "*","/","%":return 6;default:return -1}}
++    mutating func expression(_ minimum:Int=0)->EdenExpression {
++        let t=take();var a:EdenExpression
++        if ["!","-","+"].contains(t){a = .unary(t,expression(7))}
++        else if t=="(" {a=expression();if peek==")"{_ = take()}}
++        else if let n=Double(t){a = .number(n)}
++        else if peek=="(" { _ = take();var args:[EdenExpression]=[];while !peek.isEmpty && peek != ")" {args.append(expression());if peek != ","{break};_ = take()};if peek==")"{_ = take()};a = .call(t,args)}
++        else {a = .key(t.hasPrefix("'") ? String(t.dropFirst()):t)}
++        while !peek.isEmpty && priority(peek)>=minimum {let op=take(),p=priority(op);a = .binary(op,a,expression(p+1))}
++        if minimum==0 && peek=="?" {_ = take();let yes=expression();if peek==":"{_ = take()};a = .choose(a,yes,expression())}
++        return a
++    }
++}
++struct EdenWidgetTemplate {
++    let index:Int, limit:Int, repeatBinding:String?, instances:[[String:Any]]
++    init(_ index:Int,_ raw:[String:Any]) {
++        self.index=index
++        limit=min(200,max(1,(raw["repeat"] as? NSNumber)?.intValue ?? 1))
++        repeatBinding=raw["repeat_bind"] as? String
++        instances=(0..<limit).map{EdenFrame.expand(raw,$0) as! [String:Any]}
++    }
++}
++private let edenDockArtworkPrefix="module:acnh/ui/dock?"
++
++final class EdenManifest {
++    static let shared=EdenManifest()
++    let root:[String:Any]
++    let pages:[String:[String:Any]]
++    let derived:[String:[String:Any]]
++    let expressions:[String:EdenExpression]
++    let widgets:[String:[EdenWidgetTemplate]]
++    let footerWidgets:[String:ClosedRange<Int>]
++    let widePockets: Bool
++    init(data:Data?=nil) {
++        let bytes=data ?? Bundle.main.url(forResource:"companion-ui",withExtension:"json",subdirectory:"dm").flatMap{try? Data(contentsOf:$0)}
++        root=(bytes.flatMap{try? JSONSerialization.jsonObject(with:$0)} as? [String:Any]) ?? [:]
++        pages=Dictionary(uniqueKeysWithValues:((root["pages"] as? [[String:Any]]) ?? []).compactMap{d in (d["id"] as? String).map{($0,d)}})
++        let pockets = pages["bag"]?["widgets"] as? [[String:Any]] ?? []
++        // The pinned layout groups each slot's art and targets, then each
++        // slot's selection bubble. Check both groups before moving them.
++        widePockets = pockets.count > 1336 && (0..<40).allSatisfy { slot in
++            pockets[19 + slot * 15]["id"] as? String == "bag_slot_\(slot)" &&
++            pockets[617 + slot * 18]["need_bind"] as? String == "bag.\(slot).count"
++        }
++        // The dock and its tabs are authored together. Some DIY detail widgets
++        // also have large y coordinates and must never enter this layer.
++        let dockWidgets=pages.compactMapValues { page -> ClosedRange<Int>? in
++            let items=(page["widgets"] as? [[String:Any]]) ?? []
++            guard let first=items.firstIndex(where:{($0["src"] as? String)?.hasPrefix(edenDockArtworkPrefix)==true}),
++                  let last=items.lastIndex(where:{($0["on_tap"] as? String)?.hasPrefix("tab.")==true}),
++                  first<=last else { return nil }
++            return first...last
++        }
++        footerWidgets=dockWidgets
++        // Only immutable manifest templates are expanded here. Live visibility,
++        // geometry, counts and input authorization are still evaluated per frame.
++        widgets=pages.mapValues { page in
++            let pageID=page["id"] as? String ?? ""
++            let dock=dockWidgets[pageID]
++            return ((page["widgets"] as? [[String:Any]]) ?? []).enumerated().compactMap { index,raw in
++                let rect=EdenFrame.rectangle(raw["rect"])
++                // Upstream's one-pixel waiting art prewarm is intentionally omitted.
++                guard rect.width != 1 || rect.height != 1 else { return nil }
++                var widget=raw
++                if pageID=="today" {
++                    if raw["src"] as? String == "module:acnh/ui/disc?d=150&c=faffe6",
++                       rect.minX==433 && (rect.minY==23 || rect.minY==27) { return nil }
++                    if raw["src_bind"] as? String == "wx.icon" {
++                        let badge=rect.insetBy(dx:-20,dy:-20)
++                        widget["type"]="weather_badge"
++                        widget["rect"]=[badge.minX,badge.minY,badge.width,badge.height]
++                    }
++                }
++                if dock?.contains(index)==true {
++                    // Use the authored shadow tint instead of painting a second icon.
++                    if let source=raw["src"] as? String,source.hasPrefix("module:acnh/ui/tabicon/"),
++                       raw["color"] as? String == "#4004554F" {
++                        widget["src"]=source+(source.contains("?") ? "&" : "?")+"sc=04554f40"
++                    }
++                    // The calibrated selection plate is light enough for dark text.
++                    if raw["type"] as? String == "label",raw["color"] as? String == "#FFFFF1C3" {
++                        widget["color"]="#FF423420"
++                    }
++                }
++                return EdenWidgetTemplate(index,widget)
++            }
++        }
++        let entries=(root["derived"] as? [[String:Any]]) ?? []
++        derived=Dictionary(uniqueKeysWithValues:entries.compactMap{d in (d["name"] as? String).map{($0,d)}})
++        expressions=Dictionary(uniqueKeysWithValues:entries.compactMap{d in guard let n=d["name"] as? String,let e=d["expr"] as? String else{return nil};return(n,EdenExpression.parse(e))})
++    }
++}
++final class EdenBindings {
++    let values:[String:Any], manifest:EdenManifest
++    var local:[String:Double],cache:[String:Double]=[:],visiting=Set<String>()
++    init(_ values:[String:Any],_ local:[String:Double],_ manifest:EdenManifest) {self.values=values;self.local=local;self.manifest=manifest}
++    func value(_ any:Any?) -> Double {if let n=any as? NSNumber{return n.doubleValue};if let s=any as? String{return Double(s) ?? number(s)};return 0}
++    func number(_ key:String)->Double {
++        if key.hasPrefix("!"){return number(String(key.dropFirst()))==0 ? 1:0}
++        if let v=local[key]{return v};if let v=cache[key]{return v}
++        if let v=values[key] as? NSNumber{return v.doubleValue}
++        guard let d=manifest.derived[key],!visiting.contains(key) else {return key.hasPrefix("@sel:") || key.hasPrefix("@map_sel:") ? -1:0}
++        visiting.insert(key);defer{visiting.remove(key)};var n=0.0
++        if let e=manifest.expressions[key]{n=e.evaluate(number)}
++        else if let a=d["all_nonzero"] as? [String]{n=a.allSatisfy{number($0) != 0} ? 1:0}
++        else if let a=d["any_nonzero"] as? [String]{n=a.contains{number($0) != 0} ? 1:0}
++        else if let op=d["cmp"] as? String {
++            let a=value(d["a"]),b=value(d["b"])
++            switch op {case "eq":n=a==b ? 1:0;case "ne":n=a != b ? 1:0;case "lt":n=a<b ? 1:0;case "le":n=a<=b ? 1:0;case "gt":n=a>b ? 1:0;case "ge":n=a>=b ? 1:0;default:break}
++        } else if let k=d["select"] as? String {n=value(d[number(k) != 0 ? "then":"else"])}
++        else if let terms=d["terms"] as? [Any] {n=value(d["add"]);for term in terms {if let t=term as? [Any],t.count==2 {n+=value(t[0])*value(t[1])}else{n+=value(term)}};if d["floor"] as? Bool==true{n=floor(n)};if d["round"] as? Bool==true{n=n.rounded()}}
++        if !n.isFinite{n=0};cache[key]=n;return n
++    }
++    func text(_ key:String)->String {values[key] as? String ?? ""}
++    func shown(_ d:[String:Any])->Bool {
++        if let a=d["anim"] as? [String:Any],let k=a["bind"] as? String,number(k)==0{return false}
++        if let k=d["need_bind"] as? String,number(k)==0{return false}
++        if let k=d["hide_bind"] as? String {
++            let n=number(k)
++            if let eq=d["hide_eq"],n==value(eq){return false}
++            if let lo=d["keep_min"],n<value(lo){return false};if let hi=d["keep_max"],n>value(hi){return false}
++        }
++        return true
++    }
++}
++struct EdenNode:Identifiable {
++    let id:Int, data:[String:Any], rect:CGRect, clip:CGRect?
++    var kind:String {data["type"] as? String ?? "rect"}
++    var action:String {data["on_tap"] as? String ?? ""}
++    var payload:Int {Int((data["payload"] as? String).flatMap(Double.init) ?? (data["payload"] as? NSNumber)?.doubleValue ?? 0)}
++    var draggable:Bool {data["draggable"] as? Bool==true}
++    var isDockArtwork:Bool {kind=="image" && (data["src"] as? String)?.hasPrefix(edenDockArtworkPrefix)==true}
++    var coversBody:Bool {
++        kind=="rect" && data["input_block"] as? Bool==true && clip==nil &&
++            rect.minX==0 && rect.minY==0 && rect.width>=1240 && rect.height>=960 && rect.height<=968
++    }
++    func contains(_ p:CGPoint)->Bool {rect.contains(p) && (clip?.contains(p) ?? true)}
++}
++struct EdenFrame {
++    let bindings:EdenBindings,page:String,nodes:[EdenNode],scrolls:[[String:Any]]
++    let extraWidth: Double
++    private let extraRecipeColumns: Int
++    private let wideRecipes: Bool
++    static func substitution(_ s:String,_ i:Int)->String {
++        var r=s.replacingOccurrences(of:"{i}",with:String(i))
++        while let a=r.range(of:"{i+"),let z=r[a.upperBound...].firstIndex(of:"}"),let n=Int(r[a.upperBound..<z]) {r.replaceSubrange(a.lowerBound...z,with:String(i+n))}
++        return r
++    }
++    static func expand(_ value:Any,_ i:Int)->Any {
++        if let s=value as? String{return substitution(s,i)}
++        if let a=value as? [Any]{return a.map{expand($0,i)}}
++        if let d=value as? [String:Any]{return d.mapValues{expand($0,i)}};return value
++    }
++    static func rectangle(_ any:Any?)->CGRect {guard let a=any as? [NSNumber],a.count==4 else{return .zero};return CGRect(x:a[0].doubleValue,y:a[1].doubleValue,width:a[2].doubleValue,height:a[3].doubleValue)}
++    @MainActor init(model:CompanionModel,manifest:EdenManifest,local:[String:Double],extraWidth:Double=0) {
++        var bindingsLocal=local;bindingsLocal["ui.page"]=Double(model.page.rawValue)
++        let b=EdenBindings(model.values,bindingsLocal.merging(["module_ready":1,"acnh.font":1]){a,_ in a},manifest);bindings=b
++        var pg=b.number("ui.pg");if pg==0 && model.ready{pg=Double(model.page.rawValue)}
++        page = b.number("host.unsupported") != 0 ? "version" : b.number("module_error") != 0 ? "error" : b.number("scene.title") != 0 ? "title" : !model.ready ? "waiting" : [1:"map",2:"bag",3:"critters",4:"diy",5:"today",6:"phone"][Int(pg)] ?? "map"
++        let p=manifest.pages[page] ?? [:]
++        self.extraWidth=extraWidth
++        let authoredScrolls = p["scrolls"] as? [[String:Any]] ?? []
++        let canExpandRecipes = page == "diy" && authoredScrolls.contains {
++            $0["id"] as? String == "diy" && Self.rectangle($0["rect"]) == CGRect(x:16,y:248,width:694,height:696)
++                && b.value($0["cols"]) == 5 && b.value($0["row_h"]) == 188
++        }
++        let expandRecipes = canExpandRecipes && extraWidth > 0
++        wideRecipes = expandRecipes
++        let recipeColumns = expandRecipes ? Int(extraWidth / 130) : 0
++        extraRecipeColumns = recipeColumns
++        let activeScrolls = authoredScrolls.filter { spec in
++            b.shown(spec) && ((spec["show_bind"] as? String).map { b.number($0) != 0 } ?? true)
++        }.map { spec -> [String:Any] in
++            guard expandRecipes, spec["id"] as? String == "diy" else { return spec }
++            var expanded = spec
++            expanded["rect"] = [16,248,694+extraWidth,696]
++            expanded["cols"] = 5 + recipeColumns
++            return expanded
++        }
++        scrolls = activeScrolls
++        let offsets = Dictionary(activeScrolls.compactMap { spec -> (String,Double)? in
++            guard let id = spec["id"] as? String else { return nil }
++            let factor = id == "diy" ? 5.0 / Double(5 + recipeColumns) : 1
++            let limit = Self.scrollLimit(spec,b)
++            return (id, min(limit, max(0, (local["@scroll:"+id] ?? 0) * factor)))
++        }, uniquingKeysWith: { first,_ in first })
++        var result:[EdenNode]=[]
++        for template in manifest.widgets[page] ?? [] {
++            let index=template.index,limit=template.limit
++            let count=template.repeatBinding.map{min(limit,max(0,Int(b.number($0))))} ?? limit
++            for i in 0..<count {
++                let d=template.instances[i];if !b.shown(d){continue}
++                // Our checked native command menu replaces the upstream informational blocker.
++                if page=="bag" && model.number("bag.native.open") != 0 && (d["input_block"] as? Bool==true || (d["need_bind"] as? String)?.contains("ui.bag.card")==true){continue}
++                var rect=Self.rectangle(d["rect"]),clip:CGRect?
++                let authoredCols = (d["repeat_cols"] as? NSNumber)?.intValue ?? limit
++                let isRecipe = expandRecipes && d["scroll"] as? String == "diy" && authoredCols == 5
++                let cols = max(1, authoredCols + (isRecipe ? recipeColumns : 0))
++                var step = b.value(d["repeat_dx"])
++                if isRecipe { step += (extraWidth - Double(recipeColumns)*130) / Double(cols) }
++                rect.origin.x+=Double(i%cols)*step;rect.origin.y+=Double(i/cols)*b.value(d["repeat_row_dy"])
++                if let k=d["x_bind"] as? String{rect.origin.x+=b.number(k)*((d["x_scale"] as? NSNumber)?.doubleValue ?? 1)}
++                if let k=d["y_bind"] as? String{rect.origin.y+=b.number(k)*((d["y_scale"] as? NSNumber)?.doubleValue ?? 1)}
++                if extraWidth > 0 {
++                    rect = Self.wideRect(rect, kind:d["type"] as? String ?? "rect",
++                                         index:index, page:page, width:extraWidth,
++                                         widePockets:manifest.widePockets, wideRecipes:expandRecipes)
++                }
++                if let s=d["scroll"] as? String {
++                    guard let scroll=scrolls.first(where:{$0["id"] as? String==s}) else{continue}
++                    if let k=scroll["show_bind"] as? String,b.number(k)==0{continue}
++                    clip=Self.rectangle(scroll["rect"])
++                    if s != "diy" || !expandRecipes {
++                        clip = clip?.offsetBy(dx:extraWidth/2,dy:0)
++                    }
++                    rect.origin.y-=offsets[s] ?? 0
++                    if let clip,rect.height>0 && !clip.intersects(rect){continue}
++                }
++                result.append(EdenNode(id:index*256+i,data:d,rect:rect,clip:clip))
++            }
++        }
++        // Scroll adornments belong directly after their list, before later cards
++        // and modal blockers. A separate final paint pass leaked them over sheets.
++        let widgets=p["widgets"] as? [[String:Any]] ?? []
++        for spec in scrolls {
++            guard let id=spec["id"] as? String,
++                  let last=widgets.lastIndex(where: { $0["scroll"] as? String == id }) else { continue }
++            let r=Self.rectangle(spec["rect"]).offsetBy(dx:id == "diy" && expandRecipes ? 0 : extraWidth/2,dy:0)
++            let cols=max(1,b.value(spec["cols"]))
++            let total=ceil(b.number(spec["count_bind"] as? String ?? "")/cols)*b.value(spec["row_h"])
++            let width=min(r.width,max(0,b.value(spec["bar_w"])))
++            guard r.height>0,width>0,total>r.height,total.isFinite else { continue }
++            let height=min(r.height,max(30,r.height*r.height/total))
++            let fraction=(offsets[id] ?? 0)/(total-r.height)
++            let track=CGRect(x:r.maxX-width,y:r.minY,width:width,height:r.height)
++            let thumb=CGRect(x:track.minX,y:r.minY+fraction*(r.height-height),width:width,height:height)
++            for (offset,rect,color) in [(254,track,spec["bar_track"]),(255,thumb,spec["bar"])] {
++                result.append(EdenNode(id:last*256+offset,data:["type":"rect","bg":color ?? "#00000000","pill":true,"apple_scrollbar":id],rect:rect,clip:r))
++            }
++        }
++        nodes=result.sorted { $0.id < $1.id }
++    }
++    static func scrollLimit(_ spec:[String:Any], _ bindings:EdenBindings) -> Double {
++        let cols = max(1,bindings.value(spec["cols"]))
++        let height = ceil(bindings.number(spec["count_bind"] as? String ?? "") / cols) * bindings.value(spec["row_h"])
++        return max(0,height - rectangle(spec["rect"]).height)
++    }
++    func scrollScale(_ id:String) -> Double {
++        id == "diy" ? 5.0 / Double(5 + extraRecipeColumns) : 1
++    }
++    func scrollRect(_ spec:[String:Any]) -> CGRect {
++        let reflowed = spec["id"] as? String == "diy" && wideRecipes
++        return Self.rectangle(spec["rect"]).offsetBy(dx:reflowed ? 0 : extraWidth/2,dy:0)
++    }
++    func sections(_ nodes:[EdenNode]) -> (body:[EdenNode], footer:[EdenNode]) {
++        let dock=bindings.manifest.footerWidgets[page]
++        var body:[EdenNode]=[],footer:[EdenNode]=[]
++        for n in nodes {
++            if dock?.contains(n.id/256) ?? (n.rect.minY>=960) {footer.append(n)}
++            else if n.rect.minY<960 {body.append(n)}
++        }
++        return (body,footer)
++    }
++    private static func wideRect(_ rect:CGRect,kind:String,index:Int,page:String,width:Double,
++                                 widePockets:Bool,wideRecipes:Bool) -> CGRect {
++        guard rect.minY < 960 else { return rect }
++        var rect = rect
++        if rect.minX == 0 && rect.minY == 0 && rect.width == 1240 {
++            // Keep the full-surface art recognizable to the background pass.
++            if kind != "image" { rect.size.width += width }
++            return rect
++        }
++        var shift = width/2
++        switch page {
++        case "bag" where widePockets:
++            switch index {
++            case 2..<7: shift = 0
++            case 12..<15: shift = width
++            case 15..<17: rect.size.width += width; shift = 0
++            case 17..<617: shift = width * (Double((index-17)/15 % 10)+0.5)/10
++            case 617..<1337: shift = width * (Double((index-617)/18 % 10)+0.5)/10
++            default: break
++            }
++        case "diy" where wideRecipes:
++            if rect.minY >= 244 && rect.minY < 948 {
++                if index == 521 { shift = width/2 }
++                else if (522..<788).contains(index) { shift = width }
++                else if (518..<521).contains(index) { shift = 0 }
++            }
++            if (516...517).contains(index) { shift = width }
++        case "map":
++            if rect.maxX <= 390 { shift = 0 }
++            if kind == "map" || (308..<321).contains(index) {
++                let scale = 1 + min(width/804,0.045)
++                // Terrain and grid labels share the same uniform transform.
++                rect.origin.x = 808 + (rect.minX-808)*scale + width/2
++                rect.origin.y = 204 + (rect.minY-204)*scale
++                rect.size.width *= scale
++                rect.size.height *= scale
++                return rect
++            }
++            if (322..<335).contains(index) { shift = width }
++        default: break
++        }
++        return rect.offsetBy(dx:shift,dy:0)
++    }
++    func source(_ node:EdenNode)->String {
++        let d=node.data
++        if let key=d["src_bind"] as? String{return bindings.text(key)}
++        if let names=d["src_names"] as? [String],let bind=d["bind"] as? String,!names.isEmpty{return names[min(names.count-1,max(0,Int(bindings.number(bind))))]}
++        return d["src"] as? String ?? ""
++    }
++    func text(_ node:EdenNode)->String {
++        let d=node.data
++        if node.kind=="value" {var s=String(Int(bindings.number(d["bind"] as? String ?? "")));if let max=d["max_bind"] as? String{s+=(d["max_sep"] as? String ?? "/")+String(Int(bindings.number(max)))};return ((d["text"] as? String ?? "")+s).replacingOccurrences(of:"\\{/?c(?::[^}]+)?\\}",with:"",options:.regularExpression)}
++        if let k=d["bind_text"] as? String{return bindings.text(k)}
++        if let map=d["text_map"] as? [String:String],let k=d["text_bind"] as? String {return flavor(map[String(Int(bindings.number(k)))] ?? "")}
++        return flavor(d["text_src"] as? String ?? d["text"] as? String ?? "")
++    }
++    func flavor(_ s:String)->String {
++        guard s.hasPrefix("msbt:") else{return s}
++        let key=String(s.split(separator:"#").last ?? "")
++        let language=bindings.text("acnh.lang")
++        let folders=bindings.manifest.root["apple_flavor"] as? [String:[String:String]] ?? [:]
++        return folders[language]?[key] ?? folders["USen"]?[key] ?? companionText("Continue on the game screen above.")
++    }
++    func hit(_ point:CGPoint)->EdenNode? {nodes.reversed().first{$0.contains(point) && (!$0.action.isEmpty || $0.draggable || $0.kind=="map" || $0.data["input_block"] as? Bool==true)}}
++}
++
++// Body and navigation have independent transforms so navigation always stays at the bottom.
++struct EdenSurfaceLayout {
++    let body:CGRect,footer:CGRect,navArt:CGRect,navControls:CGRect,content:CGRect,left:CGRect,right:CGRect
++    let bodyScale:Double,navScale:Double
++    let bodyOffset:CGPoint,navOffset:CGPoint
++    let extraWidth:Double
++    init(_ size:CGSize, controls:Bool=false, expand:Bool=false, dockInsets:EdgeInsets=EdgeInsets()) {
++        let insets=dm_companion_dock_insets(left:dockInsets.leading,right:dockInsets.trailing,bottom:dockInsets.bottom)
++        let shared=dm_companion_surface_make_safe(size,controls ? 1:0,insets)
++        body=shared.body;footer=shared.footer;navArt=shared.nav_art;navControls=shared.nav_controls
++        content=shared.content;left=shared.left;right=shared.right
++        bodyScale=shared.body_scale
++        let extra = shared.body_scale > 0 ? max(0, shared.body.width / shared.body_scale - 1240) : 0
++        extraWidth = expand && !controls && extra >= 48 ? extra : 0
++        bodyOffset = CGPoint(x:shared.body_offset.x-extraWidth*bodyScale/2,y:shared.body_offset.y)
++        navScale=shared.nav_scale;navOffset=shared.nav_offset
++    }
++    func bodyArtwork(_ nodes:[EdenNode]) -> (background:EdenNode?, content:[EdenNode]) {
++        let background = nodes.first {
++            $0.kind == "image" && $0.rect == CGRect(x:0,y:0,width:1240,height:1080)
++        }
++        // The wallpaper is painted once. Alternate themes supply their outer
++        // panel and its shadow separately from the widgets within the page.
++        let content=nodes.filter { node in
++            guard node.id != background?.id else { return false }
++            guard node.kind=="image",let source=node.data["src"] as? String else { return true }
++            let rect=EdenFrame.rectangle(node.data["rect"])
++            guard rect.minX==12 && rect.width==1216 && rect.height==948 else { return true }
++            return !(rect.minY==12 && source.hasPrefix("module:acnh/ui/panel/") ||
++                     rect.minY==18 && source.hasPrefix("module:acnh/ui/card?"))
++        }
++        return (background,content)
++    }
++    static func wallpaperRect(_ source:String,size:CGSize) -> CGRect {
++        switch source {
++        case "module:acnh/bg/0/map", "module:acnh/bg/0/critters", "module:acnh/bg/0/diy":
++            // These original textures contain a rounded panel baked into the
++            // 1240 x 1080 canvas. Fill from its interior without copying pixels.
++            let x=size.width/1112,y=size.height/844
++            return CGRect(x:-64*x,y:-64*y,width:1240*x,height:1080*y)
++        default:
++            return CGRect(origin:.zero,size:size)
++        }
++    }
++    func point(_ p:CGPoint)->CGPoint {
++        let nav=p.y>=footer.minY,o=nav ? navOffset:bodyOffset
++        let scale=nav ? navScale:bodyScale
++        return CGPoint(x:(p.x-o.x)/scale,y:(p.y-o.y)/scale)
++    }
++    func bodyDistance(_ translation:CGSize) -> Double {
++        hypot(translation.width,translation.height)/bodyScale
++    }
++    var touchShape:Path {
++        Path { path in path.addRect(body);path.addRect(navControls) }
++    }
++    var dockShape:Path {
++        // Only the exposed top corners are rounded. The window clips the
++        // flush bottom edge to the actual display or scene corner shape.
++        let radius=min(18,navControls.height*0.28)
++        return UnevenRoundedRectangle(topLeadingRadius:radius,topTrailingRadius:radius,style:.continuous).path(in:footer)
++    }
++    var bodyCoverRect:CGRect {
++        CGRect(x:(body.minX-bodyOffset.x)/bodyScale,y:(body.minY-bodyOffset.y)/bodyScale,
++               width:body.width/bodyScale,height:body.height/bodyScale)
++    }
++    func tapPoint(_ p:CGPoint)->CGPoint {
++        var logical=point(p)
++        // The authored navigation art is letterboxed inside the physical bar.
++        // Its entire height selects the same row, including the compact-width
++        // top/bottom padding. Body coordinates and drag transforms stay exact.
++        if navControls.contains(p){logical.y=968+112/2}
++        return logical
++    }
++}
++
++@MainActor private final class EdenImages:ObservableObject {
++    @Published var epoch=0
++    private let cache=NSCache<NSString,CGImage>()
++    private var visible:[String:CGImage]=[:],visibleBytes=0
++    private var pending=Set<String>(),failed:[String:Date]=[:]
++    private var attempts:[String:Int]=[:],requested=Set<String>()
++    private var queue:[String]=[],nextImage=0
++    private let requestLimit=2
++    private var retry:Task<Void,Never>?
++    private var retryAt:Date?,retryGeneration=0
++    init(){cache.totalCostLimit=96*1024*1024;cache.countLimit=1024}
++    deinit { retry?.cancel() }
++    func get(_ key:String)->CGImage? {visible[key] ?? cache.object(forKey:key as NSString)}
++    private func updateBudget() {
++        let remaining=96*1024*1024-visibleBytes
++        // A zero NSCache cost limit means unlimited. Visible images are the working
++        // set; only the remaining budget belongs to discardable warm-page images.
++        cache.totalCostLimit=max(1,remaining)
++        if remaining<=0{cache.removeAllObjects()}
++    }
++    private func pin(_ image:CGImage,_ key:String) {
++        if let old=visible[key]{visibleBytes-=old.bytesPerRow*old.height}
++        cache.removeObject(forKey:key as NSString)
++        visible[key]=image;visibleBytes+=image.bytesPerRow*image.height;updateBudget()
++    }
++    private func cancelRetry() {retryGeneration+=1;retry?.cancel();retry=nil;retryAt=nil}
++    func suspend() {
++        requested=[];queue=[];nextImage=0;cancelRetry()
++        let parked=visible;visible=[:];visibleBytes=0;updateBudget()
++        for (key,image) in parked{cache.setObject(image,forKey:key as NSString,cost:image.bytesPerRow*image.height)}
++        failed.removeAll();attempts.removeAll()
++    }
++    func trim() { requested=[];queue=[];nextImage=0;cancelRetry();visible.removeAll();visibleBytes=0;cache.removeAllObjects();updateBudget();failed.removeAll();attempts.removeAll();epoch+=1 }
++    private func retryMissing(_ model:CompanionModel) {
++        let deadlines=failed.compactMap { key,time -> Date? in
++            guard !pending.contains(key) else{return nil}
++            return time.addingTimeInterval(min(30,pow(2,Double(attempts[key] ?? 1))))
++        }
++        guard model.presented,pending.count<requestLimit,let deadline=deadlines.min() else{cancelRetry();return}
++        if let scheduled=retryAt,scheduled<=deadline{return}
++        // A newly missing asset may need an earlier retry than an older failure.
++        // Superseded tasks must not clear a newer request's scheduler state.
++        cancelRetry();retryAt=deadline
++        let generation=retryGeneration
++        let delay=max(0.05,deadline.timeIntervalSinceNow)
++        retry=Task { @MainActor [weak self,weak model] in
++            do { try await Task.sleep(for:.seconds(delay)) } catch {return}
++            guard !Task.isCancelled,let self,let model,self.retryGeneration==generation else{return};self.retry=nil;self.retryAt=nil
++            if model.presented {self.nextImage=0;self.loadAvailable(model)}
++        }
++    }
++    func request(_ keys:[String],_ model:CompanionModel) {
++        guard model.presented else{suspend();return}
++        queue=keys;nextImage=0;requested=Set(keys)
++        // NSCache may discard objects at any time. Keep the current frame's images
++        // alive independently; release those pins as soon as their keys leave view.
++        let previous=visible;visible=visible.filter{requested.contains($0.key)}
++        visibleBytes=visible.values.reduce(0){$0+$1.bytesPerRow*$1.height};updateBudget()
++        for (key,image) in previous where !requested.contains(key){cache.setObject(image,forKey:key as NSString,cost:image.bytesPerRow*image.height)}
++        for key in keys where visible[key]==nil{if let image=cache.object(forKey:key as NSString){pin(image,key)}}
++        failed=failed.filter{requested.contains($0.key)};attempts=attempts.filter{requested.contains($0.key)}
++        loadAvailable(model)
++    }
++    private func loadAvailable(_ model:CompanionModel) {
++        guard model.presented else { return }
++        // The native decoder is serial. Leave at most one extra job queued so
++        // obsolete page requests cannot occupy the worker after a tab change.
++        while pending.count<requestLimit && nextImage<queue.count {
++            let key=queue[nextImage];nextImage+=1
++            guard key.hasPrefix("module:"),get(key)==nil,!pending.contains(key) else { continue }
++            if let time=failed[key],Date().timeIntervalSince(time)<min(30,pow(2,Double(attempts[key] ?? 1))){continue}
++            pending.insert(key)
++            model.load(key){[weak self] data,w,h in
++                var image:CGImage?
++                if let data,w>0,h>0,w<=4096,h<=4096,data.count==w*h*4,let provider=CGDataProvider(data:data as CFData) {
++                    // The module emits sRGB RGBA bytes. DeviceRGB has no stable
++                    // gamut and can reinterpret app-icon colours on P3 displays.
++                    image=CGImage(width:w,height:h,bitsPerComponent:8,bitsPerPixel:32,bytesPerRow:w*4,space:CGColorSpace(name:CGColorSpace.sRGB)!,bitmapInfo:CGBitmapInfo(rawValue:CGBitmapInfo.byteOrder32Big.rawValue|CGImageAlphaInfo.last.rawValue),provider:provider,decode:nil,shouldInterpolate:true,intent:.defaultIntent)
++                }
++                let result=image
++                Task{@MainActor in
++                    guard let self else{return};self.pending.remove(key)
++                    if model.presented,self.requested.contains(key) {
++                        if let result{self.pin(result,key);self.failed.removeValue(forKey:key);self.attempts.removeValue(forKey:key);self.epoch+=1}
++                        else{self.failed[key]=Date();self.attempts[key]=min(6,(self.attempts[key] ?? 0)+1)}
++                    }
++                    self.loadAvailable(model)
++                }
++            }
++        }
++        retryMissing(model)
++    }
++}
++private func edenColor(_ value:Any?,_ fallback:String="#00000000")->Color {
++    let s=(value as? String ?? fallback).replacingOccurrences(of:"#",with:"")
++    let n=UInt64(s,radix:16) ?? 0
++    return Color(.sRGB,red:Double((n>>16)&255)/255,green:Double((n>>8)&255)/255,blue:Double(n&255)/255,opacity:s.count==8 ? Double((n>>24)&255)/255:1)
++}
++private func edenLabelKey(_ text:String,_ scale:Double,_ color:Any?)->String {
++    let safe=CharacterSet.alphanumerics.union(CharacterSet(charactersIn:"-_.~"))
++    let encoded=text.addingPercentEncoding(withAllowedCharacters:safe) ?? ""
++    let c=(color as? String ?? "#FF746144").replacingOccurrences(of:"#",with:"")
++    let rgba=c.count==8 ? String(c.dropFirst(2))+String(c.prefix(2)):c+"ff"
++    return "module:acnh/ui/label?t=\(encoded)&px=\(Int(scale*5))&c=\(rgba)"
++}
++
++@MainActor struct EdenCompanionView:View {
++    @ObservedObject var model:CompanionModel
++    @StateObject private var images=EdenImages()
++    @State private var local:[String:Double]=["@sel:res":-1,"@map_sel:hit":-1,"@flag:theme":Double(UserDefaults.standard.integer(forKey:"DmCompanionTheme"))]
++    @State private var dragging:EdenNode?
++    @State private var dragPoint=CGPoint.zero
++    @State private var dragToken=""
++    @State private var startScroll:Double=0
++    @State private var mapZoom:Double=1
++    @State private var pinchStart:Double=1
++    @State private var mapPan=CGSize.zero
++    @State private var startPan=CGSize.zero
++    @State private var movingSlot:Int?
++    @State private var movingToken=""
++    @GestureState private var dragTouch=false
++    @GestureState private var pinchTouch=false
++    @State private var gestureActive=false
++    @State private var gestureController:Bool?
++    @State private var dragStarted=false
++    @State private var dragSequence=0
++    private let manifest:EdenManifest
++    init(model:CompanionModel,manifest:EdenManifest = .shared) {_model=ObservedObject(wrappedValue:model);self.manifest=manifest}
++    private func labelLines(_ text:String,_ node:EdenNode)->[String] {
++        guard let width=node.data["wrap_width"] as? NSNumber,width.doubleValue>0 else{return text.components(separatedBy:"\n")}
++        let cap=((node.data["text_scale"] as? NSNumber)?.doubleValue ?? 4)*5
++        let chars=max(1,Int(width.doubleValue/cap)),maxLines=(node.data["max_lines"] as? NSNumber)?.intValue ?? 3
++        var lines:[String]=[],line="",size=0.0
++        for c in text {let advance=c.unicodeScalars.contains{$0.value>=0x2E80} ? 1.0:0.6;if c=="\n" || size+advance>Double(chars){lines.append(line);line="";size=0};if c != "\n"{line.append(c);size+=advance}}
++        if !line.isEmpty{lines.append(line)};return Array(lines.prefix(maxLines))
++    }
++    private func mapNodes(_ n:EdenNode,_ f:EdenFrame)->[EdenNode] {
++        let b=f.bindings,area=(manifest.root["map"] as? [String:Any])?["areas"] as? [String:Any]
++        guard let spec=area?[n.data["area"] as? String ?? "island"] as? [String:Any] else{return []}
++        let minXY=spec["min"] as? [Double] ?? [60,-1175],maxXY=spec["max"] as? [Double] ?? [1300,-106]
++        let x0=b.number("ui.mapv.rx0.0"),y0=b.number("ui.mapv.ry0.0"),x1=b.number("ui.mapv.rx1.0"),y1=b.number("ui.mapv.ry1.0")
++        let vx=x1>x0 ? x0:minXY[0],vy=y1>y0 ? y0:minXY[1],vw=x1>x0 ? x1-x0:maxXY[0]-minXY[0],vh=y1>y0 ? y1-y0:maxXY[1]-minXY[1]
++        let sx=n.rect.width/vw*mapZoom,sy=n.rect.height/vh*mapZoom
++        func point(_ x:Double,_ y:Double)->CGPoint {CGPoint(x:n.rect.midX+(x-vx-vw/2)*sx+mapPan.width,y:n.rect.midY-(y-vy-vh/2)*sy+mapPan.height)}
++        let p=point(minXY[0],maxXY[1]);var nodes=[EdenNode(id:-1,data:["type":"image","src":b.text(n.data["image_bind"] as? String ?? "map.base.key")],rect:CGRect(x:p.x,y:p.y,width:(maxXY[0]-minXY[0])*sx,height:(maxXY[1]-minXY[1])*sy),clip:n.rect)]
++        let groups=n.data["groups"] as? [String:[String:Any]] ?? [:]
++        for (index,m) in ((spec["dynamic_markers"] as? [[String:Any]]) ?? []).enumerated() {
++            let group=m["group"] as? String ?? ""
++            if let g=groups[group] {if let show=g["show_bind"] as? String,b.number(show)==0{continue};if mapZoom<b.value(g["min_zoom"]){continue}}
++            let scale=m["scale"] as? [Double] ?? [1,1],anchor=m["anchor"] as? [Double] ?? [0.5,0.5]
++            for i in 0..<min(100,(m["count"] as? NSNumber)?.intValue ?? 0) {
++                let d=EdenFrame.expand(m,i) as! [String:Any]
++                if let k=d["kind"] as? String,let hide=d["hide_when_kind"],b.number(k)==b.value(hide){continue}
++                let key=b.text(d["icon_src_bind"] as? String ?? "");if key.isEmpty{continue}
++                let p=point(b.number(d["x"] as? String ?? "")*scale[0],b.number(d["y"] as? String ?? "")*scale[1])
++                let world=b.value(d["size_world"]),size=b.value(d["size"])
++                let w=world>0 ? world*sx:size,h=world>0 ? world*sy:size
++                let rect=CGRect(x:p.x-w*anchor[0],y:p.y-h*anchor[1],width:w,height:h)
++                if !n.rect.intersects(rect){continue}
++                var data:[String:Any]=["type":"image","src":key]
++                if group=="hit" {data["on_tap"]="fac_pick";data["payload"]=String(i)}
++                nodes.append(EdenNode(id:-100-index*100-i,data:data,rect:rect,clip:n.rect))
++            }
++        }
++        return nodes
++    }
++    private func clampedPan(_ proposed:CGSize,_ f:EdenFrame)->CGSize {
++        guard let map=f.nodes.first(where:{$0.kind=="map"}),
++              let areas=(manifest.root["map"] as? [String:Any])?["areas"] as? [String:[String:Any]],
++              let area=areas[map.data["area"] as? String ?? ""],let lo=area["min"] as? [Double],let hi=area["max"] as? [Double],lo.count==2,hi.count==2 else{return .zero}
++        let b=f.bindings,x0=b.number("ui.mapv.rx0.0"),x1=b.number("ui.mapv.rx1.0"),y0=b.number("ui.mapv.ry0.0"),y1=b.number("ui.mapv.ry1.0")
++        guard x1>x0,y1>y0 else{return .zero}
++        let sx=map.rect.width/(x1-x0)*mapZoom,sy=map.rect.height/(y1-y0)*mapZoom
++        let left=map.rect.width/2+(lo[0]-(x0+x1)/2)*sx,right=map.rect.width/2+(hi[0]-(x0+x1)/2)*sx
++        let top=map.rect.height/2-(hi[1]-(y0+y1)/2)*sy,bottom=map.rect.height/2-(lo[1]-(y0+y1)/2)*sy
++        return CGSize(width:min(-left,max(map.rect.width-right,proposed.width)),height:min(-top,max(map.rect.height-bottom,proposed.height)))
++    }
++    private func extraNodes(_ f:EdenFrame)->[EdenNode] {
++        guard f.page=="bag" else{return []};var nodes:[EdenNode]=[]
++        func chip(_ id:Int,_ rect:CGRect,_ title:String,_ action:String) {
++            nodes.append(EdenNode(id:id,data:["type":"image","src":"module:acnh/ui/capsule?w=\(Int(rect.width))&h=\(Int(rect.height))&c=fff1c3","on_tap":action,"apple_label":companionText(title)],rect:rect,clip:nil))
++            nodes.append(EdenNode(id:id+1,data:["type":"label","text":companionText(title),"text_scale":4,"color":"#FF746144","align":"center"],rect:CGRect(x:rect.midX,y:rect.midY-10,width:0,height:0),clip:nil))
++        }
++        let selected=(model.values["bag.sel"] as? NSNumber)?.intValue ?? -1,busy=model.number("bag.busy") != 0
++        if model.number("bag.native.open") != 0 {
++            nodes.append(EdenNode(id:900000,data:["type":"rect","bg":"#6504554F","input_block":true],rect:CGRect(x:0,y:0,width:1240,height:964),clip:nil))
++            let count=model.count("bag.native.count",max:7),height=Double(count+1)*78+94
++            nodes.append(EdenNode(id:900001,data:["type":"image","src":"module:acnh/ui/card?w=700&h=\(Int(height))&r=46&c=fffbe8"],rect:CGRect(x:270,y:140,width:700,height:height),clip:nil))
++            let item=model.text("bag.\(model.number("bag.native.slot")).name",companionText("Pockets"))
++            nodes.append(EdenNode(id:900002,data:["type":"label","text":item,"text_scale":6,"color":"#FF746144","align":"center"],rect:CGRect(x:620,y:165,width:0,height:0),clip:nil))
++            for i in 0..<count {chip(900010+i*2,CGRect(x:305,y:220+Double(i)*78,width:630,height:64),model.text("bag.native.\(i).name"),"apple.command.\(i)")}
++            chip(900100,CGRect(x:405,y:220+Double(count)*78,width:430,height:64),"Cancel","apple.close")
++        } else {
++            if model.number("scene.bag") != 0 && !busy {chip(901050,CGRect(x:808,y:708,width:392,height:64),"Close game pockets","apple.close")}
++            if busy {chip(901060,CGRect(x:808,y:875,width:392,height:64),"Cancel","apple.cancel")}
++            if selected>=0 && selected<40 && !model.pocketToken(selected).isEmpty && model.number("bag.can_use") != 0 && !busy {chip(901000,CGRect(x:808,y:796,width:392,height:64),"Use / actions","apple.use")}
++            if model.number("bag.can_write") != 0 && !busy {
++                if selected>=0 && selected<40 && !model.pocketToken(selected).isEmpty {chip(901010,CGRect(x:808,y:875,width:188,height:64),movingSlot==nil ? "Move":"Cancel","apple.move")}
++                chip(901020,CGRect(x:1010,y:875,width:190,height:64),"Sort pockets","apple.sort")
++            }
++            if movingSlot != nil {nodes.append(EdenNode(id:901030,data:["type":"label","text":companionText("Tap a destination slot"),"text_scale":4,"color":"#FF746144","align":"center"],rect:CGRect(x:620,y:947,width:0,height:0),clip:nil))}
++        }
++        return nodes.map { node in
++            var rect = node.rect
++            if node.coversBody { rect.size.width += f.extraWidth }
++            else if node.id >= 901000 && node.id != 901030 { rect.origin.x += f.extraWidth }
++            else { rect.origin.x += f.extraWidth/2 }
++            return EdenNode(id:node.id,data:node.data,rect:rect,clip:node.clip)
++        }
++    }
++    private func renderNodes(_ f:EdenFrame)->[EdenNode] {var a:[EdenNode]=[];for n in f.nodes {if n.kind=="map"{a.append(contentsOf:mapNodes(n,f))};a.append(n)};a+=extraNodes(f);return a}
++    private func assetKeys(_ nodes:[EdenNode],_ f:EdenFrame,wallpaper:String?)->[String] {
++        var keys=wallpaper.map { [$0] } ?? []
++        var labels:[String]=[]
++        for n in nodes {
++            if n.kind=="image" || n.kind=="weather_badge" { keys.append(f.source(n)) }
++            if n.kind=="label" || n.kind=="value" {
++                let scale=(n.data["text_scale"] as? NSNumber)?.doubleValue ?? 4
++                for line in labelLines(f.text(n),n) where !line.isEmpty {
++                    labels.append(edenLabelKey(line,scale,n.data["color"]))
++                }
++            }
++        }
++        var seen=Set<String>()
++        return (keys+labels).filter { !$0.isEmpty && seen.insert($0).inserted }
++    }
++    private func drawWeatherBadge(_ key:String,in rect:CGRect,context:inout GraphicsContext) {
++        context.fill(Path(ellipseIn:rect.offsetBy(dx:0,dy:4)),with:.color(edenColor("#3004554F")))
++        context.fill(Path(ellipseIn:rect),with:.color(edenColor("#FFFAFFE6")))
++        context.stroke(Path(ellipseIn:rect.insetBy(dx:5,dy:5)),with:.color(edenColor("#FFCBDDBD")),lineWidth:2)
++        guard let image=images.get(key) else { return }
++        // TV forecasts include a coloured square; the fallback symbol already
++        // has a transparent background and needs more room around its edges.
++        let inset=key.hasPrefix("module:acnh/ui/today/wx/") ? 13.0 : 26.0
++        let art=rect.insetBy(dx:inset,dy:inset)
++        context.clip(to:Path(ellipseIn:art))
++        context.draw(Image(decorative:image,scale:1),in:art)
++    }
++    private func draw(_ nodes:[EdenNode],_ f:EdenFrame,_ context:inout GraphicsContext,bodyCover:(GraphicsContext,CGRect)?=nil) {
++        for n in nodes {
++            var c=context;var r=n.rect
++            if n.coversBody,let cover=bodyCover {c=cover.0;r=cover.1}
++            if let clip=n.clip{c.clip(to:Path(clip))};let d=n.data
++            switch n.kind {
++            case "image":if let im=images.get(f.source(n)){c.draw(Image(decorative:im,scale:1),in:r)}
++            case "weather_badge":drawWeatherBadge(f.source(n),in:r,context:&c)
++            case "label","value":
++                let scale=(d["text_scale"] as? NSNumber)?.doubleValue ?? 4,cap=scale*5,align=d["align"] as? String ?? "left"
++                for (i,line) in labelLines(f.text(n),n).enumerated() where !line.isEmpty {
++                    let y=r.minY+Double(i)*(cap+((d["line_gap"] as? NSNumber)?.doubleValue ?? 4))
++                    if let im=images.get(edenLabelKey(line,scale,d["color"])) {
++                        let w=Double(im.width),h=Double(im.height),x=r.minX-(align=="center" ? w/2:align=="right" ? w:0)
++                        if let outline=d["outline"] {c.addFilter(.shadow(color:edenColor(outline),radius:(d["outline_px"] as? NSNumber)?.doubleValue ?? 1))}
++                        c.draw(Image(decorative:im,scale:1),in:CGRect(x:x,y:y,width:w,height:h))
++                    } else {
++                        let text=Text(line).font(.system(size:cap*1.34,weight:.bold,design:.rounded)).foregroundColor(edenColor(d["color"],"#FF746144"))
++                        c.draw(text,at:CGPoint(x:r.minX,y:y),anchor:align=="center" ? .top:align=="right" ? .topTrailing:.topLeading)
++                    }
++                }
++            case "rect","button","bar":
++                let radius=d["pill"] as? Bool==true ? min(r.width,r.height)/2:0,path=Path(roundedRect:r,cornerRadius:radius)
++                c.fill(path,with:.color(edenColor(d["bg"])))
++                if n.kind=="bar" {let total=f.bindings.number(d["max_bind"] as? String ?? ""),amount=f.bindings.number(d["bind"] as? String ?? "");var fill=r;fill.size.width*=total>0 ? min(1,max(0,amount/total)):0;c.fill(Path(fill),with:.color(edenColor(d["color"])))}
++                else {let border=(d["border"] as? NSNumber)?.doubleValue ?? (d["frame"] as? NSNumber)?.doubleValue ?? 0;if border>0{c.stroke(path,with:.color(edenColor(d["color"])),lineWidth:border)}}
++            default:break
++            }
++        }
++        if bodyCover != nil,let dragging,dragging.draggable,dragPoint != .zero,let im=images.get(f.source(dragging)) {
++            var c=context;c.opacity=0.87;c.draw(Image(decorative:im,scale:1),in:CGRect(x:dragPoint.x-dragging.rect.width*0.6,y:dragPoint.y-dragging.rect.height*0.6,width:dragging.rect.width*1.2,height:dragging.rect.height*1.2))
++        }
++    }
++    private func action(_ n:EdenNode,_ f:EdenFrame) {
++        if n.data["input_block"] as? Bool==true && n.action.isEmpty{return}
++        let name=n.action,payload=n.payload
++        if name=="fac_pick"{local["@map_sel:hit"]=Double(payload);mapZoom=1;pinchStart=1;mapPan = .zero}
++        if name.hasPrefix("crit_"){local["@scroll:crit"]=0}
++        if name.hasPrefix("diy_"){local["@scroll:diy"]=0}
++        if name.hasPrefix("apple.command."),let i=Int(name.dropFirst(14)){model.pocketCommand(i);return}
++        switch name {
++        case "apple.use":model.usePocket(model.number("bag.sel"));return
++        case "apple.cancel":model.action("bag_cancel",0);return
++        case "apple.close":model.action("bag_close",0);return
++        case "apple.sort":movingSlot=nil;model.action("bag_sort",0);return
++        case "apple.move":if movingSlot != nil{movingSlot=nil}else{movingSlot=model.number("bag.sel");movingToken=model.pocketToken(movingSlot!)};return
++        default:break
++        }
++        if let from=movingSlot,let id=n.data["id"] as? String,id.hasPrefix("bag_slot_"),let destination=Int(id.dropFirst(9)) {
++            _ = model.movePocket(from:from,to:destination,expected:movingToken);movingSlot=nil;return
++        }
++        if let group=n.data["select_group"] as? String {local["@sel:"+group]=Double(payload)}
++        guard let d=(manifest.root["actions"] as? [String:[String:Any]])?[name] else{return}
++        if let enabled=d["enabled_bind"] as? String,f.bindings.number(enabled)==0{return}
++        let argument=(d["argument"] as? String)=="$payload" ? payload:Int(f.bindings.value(d["argument"]))
++        switch d["kind"] as? String {
++        case "module":
++            let a=d["action"] as? String ?? ""
++            if a=="ui_open",let page=CompanionPage(rawValue:argument){movingSlot=nil;model.select(page);local["ui.page"]=Double(argument)}
++            else {model.action(a,argument)}
++        case "flag":let flag=d["flag"] as? String ?? "";let v=(d["value"] as? String)=="$payload" ? Double(payload):f.bindings.value(d["value"]);local["@flag:"+flag]=v;if flag=="theme"{UserDefaults.standard.set(Int(v),forKey:"DmCompanionTheme")}
++        case "map_select":local["@map_sel:"+(d["group"] as? String ?? "hit")]=f.bindings.value(d["value"]);mapZoom=1;pinchStart=1;mapPan = .zero
++        case "view_reset":mapZoom=1;pinchStart=1;mapPan = .zero;local["@sel:res"] = -1;local["@map_sel:hit"] = -1
++        case "button":model.action("host.press."+(d["button"] as? String ?? "a").lowercased(),120)
++        default:break
++        }
++    }
++    private func tap(_ p:CGPoint,_ nodes:[EdenNode],_ f:EdenFrame) {
++        // Marker targets are composited inside the map, above its terrain gesture surface.
++        if let n=nodes.reversed().first(where:{$0.contains(p) && (!$0.action.isEmpty || $0.data["input_block"] as? Bool==true)}) {action(n,f)}
++    }
++    private func gestureHit(_ point:CGPoint,_ nodes:[EdenNode],_ f:EdenFrame)->EdenNode? {
++        guard let top=nodes.reversed().first(where:{$0.contains(point) && (!$0.action.isEmpty || $0.draggable || $0.kind=="map" || $0.data["input_block"] as? Bool==true)}) else{return nil}
++        if let id=top.data["id"] as? String,id.hasPrefix("bag_slot_"),let source=nodes.reversed().first(where:{$0.draggable && $0.data["id"] as? String==id && $0.contains(point)}){return source}
++        if top.action=="fac_pick",let map=f.nodes.first(where:{$0.kind=="map" && $0.contains(point)}){return map}
++        return top
++    }
++    private func accessibleNodes(_ nodes:[EdenNode])->[EdenNode] {
++        var seen=Set<String>(),result:[EdenNode]=[]
++        for n in nodes.reversed() where !n.action.isEmpty {
++            if model.number("bag.native.open") != 0 && n.id<900000 && !n.action.hasPrefix("tab."){continue}
++            let id=n.data["id"] as? String ?? "\(n.action).\(n.payload).\(n.id)"
++            if seen.insert(id).inserted{result.append(n)}
++        }
++        return result.reversed()
++    }
++    private func beginInteraction() {
++        if !gestureActive {
++            gestureController = model.externalController
++            gestureActive=true
++            model.uiActivity?(1,true)
++        }
++    }
++    private func endInteraction() {
++        if gestureActive {
++            gestureController = nil
++            gestureActive=false
++            model.uiActivity?(1,false)
++        }
++    }
++    private var localOperation:Bool {movingSlot != nil || (local["@flag:theme_sheet"] ?? 0) != 0}
++    var body:some View {
++        GeometryReader{geometry in
++            #if os(iOS)
++            let controller = gestureController ?? model.externalController
++            let layout=EdenSurfaceLayout(geometry.size,controls:!controller,expand:controller,dockInsets:model.dockInsets)
++            #else
++            let layout=EdenSurfaceLayout(geometry.size)
++            #endif
++            let f=EdenFrame(model:model,manifest:manifest,local:local,extraWidth:layout.extraWidth)
++            let (bodyNodes,footerNodes)=f.sections(renderNodes(f))
++            let hasDock=footerNodes.contains(where: { $0.isDockArtwork })
++            let navNodes=footerNodes.filter { !$0.isDockArtwork }
++            let artwork=layout.bodyArtwork(bodyNodes)
++            let wallpaper=artwork.background.map(f.source)
++            let nodes=artwork.content+navNodes
++            let keys=assetKeys(navNodes+artwork.content,f,wallpaper:wallpaper)
++            Canvas{context,_ in
++                // The same wallpaper fills the body, the side rails and the footer.
++                if let wallpaper,let image=images.get(wallpaper) {
++                    var backdrop=context;backdrop.clip(to:Path(CGRect(origin:.zero,size:geometry.size)))
++                    backdrop.draw(Image(decorative:image,scale:1),in:EdenSurfaceLayout.wallpaperRect(wallpaper,size:geometry.size))
++                }
++                // Occupancy/menu scrims cover the complete physical body, under
++                // the separately hosted controls. Foreground cards keep their
++                // fitted centre transform and navigation remains accessible.
++                var cover=context;cover.clip(to:Path(layout.body));cover.translateBy(x:layout.bodyOffset.x,y:layout.bodyOffset.y);cover.scaleBy(x:layout.bodyScale,y:layout.bodyScale)
++                var body=context;body.clip(to:Path(layout.content));body.translateBy(x:layout.bodyOffset.x,y:layout.bodyOffset.y);body.scaleBy(x:layout.bodyScale,y:layout.bodyScale);draw(artwork.content,f,&body,bodyCover:(cover,layout.bodyCoverRect))
++                if hasDock {context.fill(layout.dockShape,with:.color(edenColor("#FFFFFBE8")))}
++                var nav=context;nav.clip(to:Path(layout.navArt));nav.translateBy(x:layout.navOffset.x,y:layout.navOffset.y);nav.scaleBy(x:layout.navScale,y:layout.navScale);draw(navNodes,f,&nav)
++
++            }
++            .background(edenColor(manifest.root["background"],"#FFFFF1C3"))
++            .contentShape(layout.touchShape)
++            .gesture(DragGesture(minimumDistance:0).updating($dragTouch){_,active,_ in active=true}.onChanged{g in
++                let inBody=layout.body.contains(g.startLocation)
++                guard inBody || layout.navControls.contains(g.startLocation) else { return }
++                beginInteraction()
++                guard inBody && layout.body.contains(g.location) else { return }
++                let p=layout.point(g.location),start=layout.point(g.startLocation)
++                if !dragStarted {
++                    dragStarted = true
++                    dragSequence &+= 1
++                    dragging=gestureHit(start,bodyNodes,f)
++                    dragToken=dragging.map{model.pocketToken($0.payload)} ?? ""
++                    startPan=mapPan
++                    if let scroll=f.scrolls.first(where:{f.scrollRect($0).contains(start)}),
++                       let id=scroll["id"] as? String {
++                        startScroll=min(EdenFrame.scrollLimit(scroll,f.bindings),
++                                        max(0,(local["@scroll:"+id] ?? 0)*f.scrollScale(id)))
++                    }
++                }
++                let distance=layout.bodyDistance(g.translation)
++                if distance>12,let dragging,dragging.draggable{dragPoint=p}
++                else if distance>12,let scroll=f.scrolls.first(where:{f.scrollRect($0).contains(start)}),
++                        let id=scroll["id"] as? String {
++                    let delta = g.translation.height / layout.bodyScale
++                    let offset = min(EdenFrame.scrollLimit(scroll,f.bindings),max(0,startScroll-delta))
++                    local["@scroll:"+id] = offset / f.scrollScale(id)
++                } else if distance>12,dragging?.kind=="map"{mapPan=clampedPan(CGSize(width:startPan.width+p.x-start.x,height:startPan.height+p.y-start.y),f)}
++            }.onEnded{g in
++                defer {
++                    clearDrag()
++                    if !pinchTouch { endInteraction() }
++                }
++                let p=layout.point(g.location),distance=layout.bodyDistance(g.translation)
++                let inBody=layout.body.contains(g.location),inFooter=layout.navControls.contains(g.location)
++                if distance>12,let source=dragging,source.draggable {
++                    if inBody,let target=bodyNodes.reversed().first(where:{$0.contains(p) && $0.data["drop_action"] != nil}) {
++                        if let name=target.data["drop_action"] as? String,name.hasPrefix("bag.drop."),let slot=Int(name.dropFirst(9)),source.payload<40{_ = model.movePocket(from:source.payload,to:slot,expected:dragToken)}
++                        else {var data=target.data;data["on_tap"]=data["drop_action"];data["payload"]=String(source.payload);action(EdenNode(id:target.id,data:data,rect:target.rect,clip:target.clip),f)}
++                    }
++                } else if distance<=12 {
++                    if inFooter && layout.navControls.contains(g.startLocation){tap(layout.tapPoint(g.location),navNodes,f)}
++                    else if inBody && layout.body.contains(g.startLocation){tap(p,bodyNodes,f)}
++                }
++            })
++            .simultaneousGesture(MagnificationGesture().updating($pinchTouch){_,active,_ in active=true}.onChanged{v in beginInteraction();if f.page=="map" {mapZoom=min(3,max(1,pinchStart*v));mapPan=clampedPan(mapPan,f)}}.onEnded{_ in pinchStart=mapZoom})
++            .accessibilityRepresentation {
++                ForEach(accessibleNodes(nodes)){n in
++                    Button(n.data["apple_label"] as? String ?? accessibilityLabel(n,f)){model.uiActivity?(1,true);action(n,f);model.uiActivity?(1,false)}.accessibilityIdentifier("duo."+(n.data["id"] as? String ?? n.action)+".\(n.payload)")
++                }
++            }
++            .task(id:keys){images.request(keys,model)}
++            .onChange(of:model.presented){visible in
++                if visible { images.request(keys,model) }
++                else { images.suspend(); movingSlot=nil; clearDrag(); endInteraction(); model.uiActivity?(2,false) }
++            }
++            #if os(iOS)
++            .onReceive(NotificationCenter.default.publisher(for:UIApplication.didReceiveMemoryWarningNotification)){
++                _ in images.trim(); images.request(keys,model)
++            }
++            #endif
++        }
++        .onChange(of:dragTouch){active in
++            guard !active else { return }
++            let sequence = dragSequence
++            // Gesture state can reset before SwiftUI delivers the final drop.
++            DispatchQueue.main.async {
++                if dragSequence == sequence { clearDrag() }
++            }
++        }
++        .onChange(of:dragTouch || pinchTouch){active in if !active{endInteraction()}}
++        .onChange(of:localOperation){busy in model.uiActivity?(2,busy)}
++        .onChange(of:model.page){_ in movingSlot=nil;clearDrag()}
++        .onDisappear{movingSlot=nil;clearDrag();endInteraction();model.uiActivity?(2,false);model.action("bag_cancel",0)}
++    }
++    private func clearDrag() {
++        dragStarted = false
++        dragging = nil
++        dragPoint = .zero
++        dragToken = ""
++    }
++    private func accessibilityLabel(_ n:EdenNode,_ f:EdenFrame)->String {
++        if n.action.hasPrefix("tab."),let p=["tab.map":CompanionPage.map,"tab.bag":.bag,"tab.critters":.critters,"tab.diy":.diy,"tab.today":.today,"tab.phone":.phone][n.action]{return p.title}
++        if let id=n.data["id"] as? String,id.hasPrefix("bag_slot_"),let slot=Int(id.dropFirst(9)){let title=model.text("bag.\(slot).name");return "\(slot+1): \(title.isEmpty ? companionText("Empty slot"):title)"}
++        if n.action=="bag_sel"{return "\(n.payload+1): \(model.text("bag.\(n.payload).name",companionText("Pockets")))"}
++        if n.action=="res_sel"{return model.text("res.\(n.payload).name","Resident \(n.payload+1)")}
++        return n.action
++    }
++}
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index c30b7efa..a5fdf2ab 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -94,9 +94,13 @@ static void tv_attach(void);
+ @property (strong, nonatomic) UIWindow *window;
+ @end
+ 
++// SwiftUI's companion (ACNHCompanion.swift): a hosting controller for the game's data-driven interface. NULL in a build without a companion.
++extern void *dm_companion_view_controller(void);
++
+ @interface DmRootVC : UIViewController
+ @property (nonatomic, strong) DmGameView *game;
+ @property (nonatomic, strong) UIView *companion;   // under the pad, in the band a split gives it (DmLayout.h dm_layout): what the game's own screens cannot show there
++@property (nonatomic, strong) UIViewController *companionVC;   // owns the SwiftUI companion; the view alone would let the controller go
+ @property (nonatomic, strong) UIView *pad;
+ @property (nonatomic, strong) UILabel *fps;
+ @property (nonatomic) BOOL launched;
+@@ -201,11 +205,13 @@ static void launcher_done(void) { [g_root startGame]; }
+     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
+     else if (getenv("DM_HUD_PER_LAYER")) { g_layer.developerHUDProperties = @{@"mode": @"disabled"}; LOG("front end: Metal performance HUD off (DM_METAL_HUD)"); }   // the shell turns Metal's HUD on for every start (ShellMain.m)
+     dm_haptics_apple_init();
+-    // The band under the picture in a split (DmLayout.h dm_layout companion): the pad floats over it, so only what no key covers is seen. Hidden while there is no
+-    // split: the picture takes the whole view and the pad's own background is all there is. Touches go through it to the pad, which owns the band's hit testing
+-    self.companion = [[UIView alloc] initWithFrame:CGRectZero];
++    // The band under the picture in a split (DmLayout.h dm_layout companion): the SwiftUI companion's view, with the pad floating over it. Hidden while
++    // there is no split: the picture takes the whole view and the pad's own background is all there is. The companion takes its own touches; the pad keeps
++    // the ones that land on a key (DmGamepad.m hitTest). A game without a companion answers NULL and keeps the empty placeholder.
++    UIViewController *companionVC = (__bridge_transfer UIViewController *)dm_companion_view_controller();
++    self.companionVC = companionVC;
++    self.companion = companionVC ? companionVC.view : [[UIView alloc] initWithFrame:CGRectZero];
+     self.companion.backgroundColor = [UIColor colorWithWhite:0.07 alpha:1];
+-    self.companion.userInteractionEnabled = NO;
+     self.companion.hidden = YES;
+     [self.view addSubview:self.companion];
+     self.pad = dm_gamepad_view(self.view.bounds);
+@@ -521,7 +527,11 @@ void front_program_handoff(int index, const char *name) {   // front.h; on the g
+     else if (err) LOG("[RED] front end: the notification for program %d could not be scheduled: %s", index, err.localizedDescription.UTF8String);
+     else LOG("front end: \"Starting %s\" shown, notification for program %d scheduled", nm.UTF8String, index);
+ }
+-void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
++void front_run(void (*guest)(void)) {   // Already on main.m's big-stack thread
++    void dm_companion_host_ready(void);
++    dm_companion_host_ready();   // the guest modules are loaded: the companion reader can now answer main's base, size and build ID
++    guest();
++}
+ 
+ // Software keyboard: show a UIAlertController on the main thread, the calling thread waits for the result
+ int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {
+diff --git a/dm/ios/Sources/zh-Hans.lproj/Companion.strings b/dm/ios/Sources/zh-Hans.lproj/Companion.strings
+new file mode 100644
+index 00000000..3079e5c4
+--- /dev/null
++++ b/dm/ios/Sources/zh-Hans.lproj/Companion.strings
+@@ -0,0 +1,92 @@
++"Map" = "地图";
++"Pockets" = "背包";
++"Critterpedia" = "图鉴";
++"DIY" = "DIY";
++"Today" = "今日";
++"NookPhone" = "手机";
++"Island companion" = "岛屿副屏";
++"Live island information" = "实时岛屿信息";
++"Live" = "实时";
++"Unsupported game version" = "当前版本暂不支持副屏";
++"The game can continue without companion data." = "游戏可以继续运行。";
++"Enter your island to see live companion data." = "进入岛屿后，这里会显示实时地图、背包和岛屿信息。";
++"Reset map" = "地图复位";
++"Miles" = "里程";
++"Category" = "分类";
++"Bugs" = "昆虫";
++"Fish" = "鱼类";
++"Sea creatures" = "海洋生物";
++"Caught" = "已捕获";
++"Filter" = "筛选";
++"All" = "全部";
++"This month" = "本月可捕获";
++"Not caught" = "未捕获";
++"Donated" = "已捐赠";
++"Can make" = "可以制作";
++"Favourites" = "已收藏";
++"Not made" = "尚未制作";
++"No recipes in this category." = "这个分类下还没有配方。";
++"Turnip price" = "大头菜价格";
++"Visitors" = "今日访客";
++"Nook Miles+" = "狸游＋任务";
++"Birthdays this month" = "本月生日";
++"Entry" = "条目";
++"Recipe" = "配方";
++"Sort pockets" = "整理";
++"Sorting" = "整理中";
++"Working…" = "正在操作…";
++"Cancel" = "取消";
++"Cancelled" = "已取消";
++"Choose a destination slot. Occupied slots are swapped." = "请选择目标格子；已有物品时会互换。";
++"Hold and drag to move, or select an item for actions." = "长按拖动可移动；点选物品可使用或操作。";
++"Use item" = "使用／操作";
++"Move" = "移动";
++"Item actions" = "道具操作";
++"Close pockets" = "收起游戏背包";
++"Inventory changed. Select the item again." = "背包已变化，请重新选择物品。";
++"Menu changed. Open the item again." = "菜单已变化，请重新打开道具操作。";
++"The game did not accept the command. Try again." = "游戏未接受本次操作，请重试。";
++"Wait until the player is ready, then try again." = "请等待当前动作或对话结束后重试。";
++
++"Your island is getting ready…" = "正在准备你的小岛…";
++"Continue on the game screen above." = "请在上方游戏画面继续。";
++"NookPhone is not available yet" = "狸端机尚未解锁";
++"Continue playing to unlock your apps." = "继续游戏即可解锁应用。";
++
++"Use / actions" = "使用／操作";
++"This game version is not supported" = "暂不支持此游戏版本";
++"Use the matching game build." = "请使用与副屏匹配的游戏版本。";
++
++"Empty slot" = "空位";
++
++"Close game pockets" = "收起游戏背包";
++
++"Auto fade" = "自动淡出";
++"Always show" = "始终显示";
++"Hide controls" = "隐藏按键，仅触控";
++"Direct touch" = "直接触控（隐藏按键）";
++"Touch" = "触控";
++"Controls" = "按键";
++"Screen controls" = "屏幕按键";
++
++"Touch controls" = "按键布局";
++"Layout" = "布局";
++"Landscape" = "横屏";
++"Portrait controls" = "竖屏控制区";
++"Drag the labels to move control groups. Portrait excludes the bottom navigation bar." = "拖动标签移动对应按键组。竖屏预览不包含底部标签栏。";
++"Button size" = "按键大小";
++"Button opacity" = "按键透明度";
++"Left stick slow-walk zone" = "左摇杆慢走区";
++"The percentage is relative to the outer ring radius. A larger zone lets you push farther before speeding up." = "百分比按外圈半径计算。慢走区越大，左摇杆需要推得越远才会加速。";
++"Stick dead zone" = "摇杆死区";
++"Reset this layout" = "重置当前布局";
++"Save" = "保存";
++"Game image" = "游戏画面";
++"Fit entire image" = "完整画面（保留黑边）";
++"Fill image" = "等比铺满（裁切边缘）";
++"Stretch image" = "拉伸铺满";
++"Expand game view" = "扩展游戏视野（铺满）";
++
++"Starting game…" = "正在启动游戏…";
++"Preparing shaders" = "正在准备着色器";
++"Preparing pipelines" = "正在准备图形管线";
+diff --git a/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m b/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
+index 775807c2..4d889efa 100644
+--- a/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
++++ b/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
+@@ -115,6 +115,13 @@ const struct dm_profile *dm_profile(void) {
+     return &profile;
+ }
+ 
++// The harness links front_ios.m but no SwiftUI companion: the production root still asks for the band's view, and an empty one stands in for it.
++void dm_companion_host_ready(void) {}
++void *dm_companion_view_controller(void) {
++    UIViewController *vc = [UIViewController new];
++    vc.view.backgroundColor = UIColor.clearColor;
++    return (__bridge_retained void *)vc;
++}
+ int front_ios_boot_ok(void) { return 1; }
+ void front_ios_boot(void) {}
+ bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewController; (void)done; return false; }
+diff --git a/dm/ios/tests/duo/Tests/DuoHarnessTests.m b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+index 5237344c..6a9f0ad3 100644
+--- a/dm/ios/tests/duo/Tests/DuoHarnessTests.m
++++ b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+@@ -375,6 +375,23 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     XCTAssertEqual(dm_opmode(), 1, @"Lying down keeps the player's docked pick, not the handheld it replaced");
+ }
+ 
++- (void)testSplitPadPassesACompanionTapThroughToTheBand {
++    // A tap on no key inside the band goes to the companion's view below (tabs, item slots); a tap on a key or on the picture stays with the pad.
++    CGRect bounds = CGRectMake(0, 0, 390, 844);
++    DmLayout layout = dm_layout(bounds, UIEdgeInsetsMake(59, 0, 34, 0), NO, CGRectNull, DM_PICTURE_16_9);
++    UIView *pad = [self padForLayout:layout bounds:bounds];
++    CGPoint minus = [self controlCenterNamed:@"−" inPad:pad];
++    XCTAssertEqual([pad hitTest:minus withEvent:nil], pad, @"A key still belongs to the pad");
++    // The band's middle-left is clear of the top menu pill, the thumb groups at 0.58 down and the right-stick area: it must pass through
++    CGPoint clear = CGPointMake(CGRectGetMinX(layout.companion) + 12, CGRectGetMidY(layout.companion));
++    XCTAssertTrue(CGRectContainsPoint(layout.controls, clear));
++    XCTAssertNil([pad hitTest:clear withEvent:nil], @"No key there: the companion below receives the tap");
++    // Landscape has no band: the pad keeps the whole view
++    DmLayout overlay = dm_layout(CGRectMake(0, 0, 844, 390), UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
++    UIView *landscapePad = [self padForLayout:overlay bounds:CGRectMake(0, 0, 844, 390)];
++    XCTAssertEqual([landscapePad hitTest:CGPointMake(8, 8) withEvent:nil], landscapePad, @"With no split the pad owns the view");
++}
++
+ - (void)testProductionRootPutsThePanelUnderThePadAndOutOfItsWay {
+     UIViewController *root = [self harnessRootViewController];
+     UIView *pad = [root valueForKey:@"pad"];
+@@ -385,8 +402,8 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     NSInteger padIndex = [root.view.subviews indexOfObjectIdenticalTo:pad];
+     NSInteger panelIndex = [root.view.subviews indexOfObjectIdenticalTo:companion];
+     XCTAssertGreaterThan(padIndex, panelIndex, @"The pad is added after the panel, so it floats over it");
+-    // The panel takes no touch of its own: the pad owns the band's hit testing (a touch on no key falls through, as before)
+-    XCTAssertFalse(companion.isUserInteractionEnabled);
++    // The pad floats over the panel and passes through a tap on no key: the companion's own tabs and item slots then receive it (DmGamepad.m hitTest)
++    XCTAssertTrue(companion.isUserInteractionEnabled);
+     [root.view layoutIfNeeded];
+     BOOL portrait = root.view.bounds.size.height > root.view.bounds.size.width;
+     XCTAssertEqual(companion.hidden, !portrait, @"The panel is shown only where a split gives it a band");
+diff --git a/dm/ios/tools/build_ipa.sh b/dm/ios/tools/build_ipa.sh
+index 3a0074ea..ccb788da 100755
+--- a/dm/ios/tools/build_ipa.sh
++++ b/dm/ios/tools/build_ipa.sh
+@@ -211,6 +211,20 @@ else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}"
+ # The packed language (DMLanguage) is the Game language row's default, which settings.py makes the game's first language when it lacks DM_LANG: the screen and DM_LAUNCHER=0 then agree
+ LD=$(python3 -c 'import json, sys; print(next((s["default"] for s in json.load(open(sys.argv[1]))["settings"] if s["env"] == "DM_LANG"), ""))' $LJ) || die "launcher settings ($LJ)"
+ if [ -n "$LD" ] && [ "$LD" != "$DM_LANG" ]; then t "game language: the game has no $DM_LANG; packing $LD, its first"; export DM_LANG=$LD; fi
++# A profile's companion.json opts the game into the Eden Duo companion: the data-driven interface manifest and its authored MSBT strings are bundled as
++# dm/companion-ui.json, the module's build-ID and input-gate configuration as dm/companion.json, and the component licenses beside it (a build that includes
++# the companion is distributed under GPL-3.0-or-later, with its notices). Games without the file pack no companion and link none.
++if [ -f "$GD/companion.json" ]; then
++  cp "$GD/companion.json" Gen/dm/companion.json || die "copy companion profile"
++  python3 "$IOS/tools/gen_companion.py" "$DM/third_party/eden_duo/acnh" Gen/dm/companion-ui.json || die "generate companion interface"
++  cp "$DM/third_party/eden_duo/LICENSE-GPL-3.0.txt" Gen/dm/companion-license.txt || die "copy companion license"
++  mkdir -p Gen/dm/companion-licenses || die "make companion notices directory"
++  cp "$DM"/third_party/eden_duo/LICENSE-*.txt "$DM/third_party/eden_duo/NOTICES.txt" "$DM/third_party/eden_duo/UPSTREAM.json" Gen/dm/companion-licenses/ || die "copy companion notices"
++  cp "$DM/third_party/zstd/LICENSE" Gen/dm/companion-licenses/LICENSE-ZSTD.txt || die "copy Zstandard license"
++  # Swift compiles the companion renderer only for this game: the other games' apps link no DMCompanion and would fail on the Swift reference.
++  echo "SWIFT_ACTIVE_COMPILATION_CONDITIONS = \$(inherited) DM_COMPANION" >> Gen/dm.xcconfig
++  t "companion: interface, profile and licenses bundled"
++fi
+ # Diagnostic build: DM_ENV_FILE=file → dm/env.txt in the bundle (main.m sets one environment variable per line at boot)
+ if [ -n "${DM_ENV_FILE:-}" ]; then cp "$DM_ENV_FILE" Gen/dm/env.txt || die "copy DM_ENV_FILE"; t "env: $(grep -v '^#' "$DM_ENV_FILE" | tr '\n' ' ')"; fi
+ # The shader libraries go into the archive as DmIOS.app/msl/<folder>, or an NVN game's as the file DmIOS.app/msl/<folder>.img (main.m sets DM_MSL_DIR to msl)
+diff --git a/dm/ios/tools/gen_build.py b/dm/ios/tools/gen_build.py
+index f1e7db48..26e216db 100644
+--- a/dm/ios/tools/gen_build.py
++++ b/dm/ios/tools/gen_build.py
+@@ -25,7 +25,7 @@ for toks in lines:
+             d = os.path.normpath(os.path.join(host, t[2:]))
+             if d not in incs: incs.append(d)
+         elif t.startswith('-D'): defs.append(t)
+-        elif t.endswith(('.c', '.m', '.S')): srcs.append(os.path.normpath(os.path.join(host, t)))
++        elif t.endswith(('.c', '.m', '.S', '.cpp', '.mm')): srcs.append(os.path.normpath(os.path.join(host, t)))   # a profile's companion module is C++ / ObjC++
+         i += 1
+ assert srcs, 'no source files in the compile command'
+ dup = sorted({s for s in srcs if srcs.count(s) > 1})
+diff --git a/dm/ios/tools/gen_companion.py b/dm/ios/tools/gen_companion.py
+new file mode 100644
+index 00000000..aabebccb
+--- /dev/null
++++ b/dm/ios/tools/gen_companion.py
+@@ -0,0 +1,68 @@
++#!/usr/bin/env python3
++"""Bundle the upstream companion manifest and its authored MSBT flavor strings.
++
++These files are companion source data, not extracted game assets. Native game
++names, pictures, fonts and item labels continue to come from the user's RomFS.
++"""
++import json
++from pathlib import Path
++import struct
++import sys
++
++
++def msbt(data):
++    if len(data) < 32 or data[:8] != b'MsgStdBn':
++        raise ValueError('invalid companion MSBT header')
++    endian = '<' if data[8:10] == b'\xff\xfe' else '>'
++    def u32(offset):
++        return struct.unpack_from(endian + 'I', data, offset)[0]
++    labels, texts, off = {}, [], 32
++    sections = struct.unpack_from(endian + 'H', data, 14)[0]
++    for _ in range(sections):
++        tag, size = data[off:off+4], u32(off+4)
++        body, end = off+16, off+16+size
++        if end > len(data):
++            raise ValueError('truncated companion MSBT section')
++        if tag == b'LBL1':
++            buckets = u32(body)
++            if buckets > (size-4)//8:
++                raise ValueError('invalid companion MSBT label table')
++            for i in range(buckets):
++                count, at = u32(body+4+i*8), body+u32(body+8+i*8)
++                for _ in range(count):
++                    if at >= end:
++                        raise ValueError('truncated companion MSBT label')
++                    length = data[at]
++                    if at+length+5 > end:
++                        raise ValueError('truncated companion MSBT label')
++                    labels[u32(at+length+1)] = data[at+1:at+length+1].decode('utf-8')
++                    at += length+5
++        if tag == b'TXT2':
++            count = u32(body)
++            if count > (size-4)//4:
++                raise ValueError('invalid companion MSBT text table')
++            for i in range(count):
++                start = body+u32(body+4+i*4)
++                stop = body+u32(body+8+i*4) if i+1 < count else end
++                if not body+4+count*4 <= start <= stop <= end:
++                    raise ValueError('invalid companion MSBT text range')
++                if data[12] != 0:
++                    raise ValueError('companion flavor must be plain UTF-8')
++                text = data[start:stop].split(b'\0', 1)[0]
++                if b'\x0e' in text or b'\x0f' in text:
++                    raise ValueError('unexpected companion MSBT format tags')
++                texts.append(text.decode('utf-8'))
++        off = (end+15) & ~15
++    return {label: texts[index] for index, label in labels.items() if index < len(texts)}
++
++
++def generate(source):
++    root = json.loads((source/'manifest.json').read_text())
++    root['apple_flavor'] = {p.stem: msbt(p.read_bytes()) for p in sorted((source/'flavor').glob('*.msbt')) if '{' not in p.name}
++    return root
++
++
++if __name__ == '__main__':
++    if len(sys.argv) != 3:
++        raise SystemExit('usage: gen_companion.py VENDOR_ACNH OUTPUT_JSON')
++    Path(sys.argv[2]).write_text(json.dumps(generate(Path(sys.argv[1])), ensure_ascii=False, separators=(',', ':'))+'\n')
+diff --git a/dm/third_party/eden_duo/NOTICES-nxnative.md b/dm/third_party/eden_duo/NOTICES-nxnative.md
+index cc591ee3..41a13ebe 100644
+--- a/dm/third_party/eden_duo/NOTICES-nxnative.md
++++ b/dm/third_party/eden_duo/NOTICES-nxnative.md
+@@ -9,6 +9,10 @@ Original component licenses:
+ 
+ - ACNH native module, portable C ABI headers and the data-driven interface
+   renderer ported to this repository: GPL-3.0-or-later (`LICENSE-GPL-3.0.txt`).
++- Apple-side host adapter, portrait layout and SwiftUI presentation
++  (`companion_apple.mm`, `companion_layout.h`, `EdenCompanion.swift`,
++  `ACNHCompanion.swift`): added for the companion-enabled build, supplied
++  under GPL-3.0-or-later with that combined build (`NOTICES.txt:16,33-34`).
+ - BC decoder: MPL-2.0 (`LICENSE-MPL-2.0.txt`).
+ - stb_image / stb_truetype: MIT or public domain (`LICENSE-STB.txt`).
+ - Zstandard decompression sources, in `../zstd`: BSD (`../zstd/LICENSE`).

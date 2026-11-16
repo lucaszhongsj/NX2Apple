@@ -1,0 +1,164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Mon, 16 Nov 2026 13:01:04 +0800
+Subject: [PATCH] ios/companion: only the profile with companion.json compiles
+ the renderer
+
+The app's sources are one directory for every game, so the two Swift files of
+the renderer used to compile everywhere: an app for a game with no companion
+linked no DMCompanion and failed on the reference. build_ipa.sh now writes
+EXCLUDED_SOURCE_FILE_NAMES into Gen/dm.xcconfig when the profile has no
+companion.json, and the renderer drops the DM_COMPANION conditionals it needed
+for that case.
+
+front_ios.m keeps its own condition, on GCC_PREPROCESSOR_DEFINITIONS: the
+target's Debug configuration sets SWIFT_ACTIVE_COMPILATION_CONDITIONS itself,
+which overrides the xcconfig without merging $(inherited), so a Swift condition
+would have been silently absent from Debug builds. The harness defines it in
+its project, where its stubs stand in for the Swift companion.
+
+Upstream-Status: pending
+Reason: The ACNH companion: Eden Duo's reader and the band a phone standing up shows it in; nxnative carries it on feat/acnh-companion
+Issue: none yet: no upstream issue for the companion
+
+---
+ dm/ios/Sources/ACNHCompanion.swift | 23 ++++-------------------
+ dm/ios/Sources/front_ios.m         | 11 +++++++++--
+ dm/ios/tests/duo/project.yml       |  1 +
+ dm/ios/tools/build_ipa.sh          |  9 ++++++---
+ 4 files changed, 20 insertions(+), 24 deletions(-)
+
+diff --git a/dm/ios/Sources/ACNHCompanion.swift b/dm/ios/Sources/ACNHCompanion.swift
+index 4ac9a609..1d590b29 100644
+--- a/dm/ios/Sources/ACNHCompanion.swift
++++ b/dm/ios/Sources/ACNHCompanion.swift
+@@ -44,13 +44,10 @@ struct CompanionMarker: Identifiable {
+     let load: ImageLoader
+     private var timer: Timer?
+     private var interactionSamples: AnyCancellable?
+-#if DM_COMPANION
++    // The module's ObjC adapter. This file joins the target only where the profile has companion.json (build_ipa.sh), which is also the only build
++    // that links the adapter; a test injects reader / sender / images and gets no engine.
+     private let native: DMCompanion?
+-#else
+-    private let native: AnyObject? = nil   // a build without the companion module has no native engine; tests inject reader / sender / images
+-#endif
+     init(reader: Reader? = nil, sender: Sender? = nil, images: ImageLoader? = nil) {
+-#if DM_COMPANION
+         let engine = reader == nil ? DMCompanion.shared() : nil
+         native = engine
+         read = reader ?? { engine?.snapshot as? [String: Any] ?? [:] }
+@@ -64,11 +61,6 @@ struct CompanionMarker: Identifiable {
+                 .sink { [weak self] _ in Task { @MainActor in self?.poll() } }
+         }
+         engine?.start()
+-#else
+-        read = reader ?? { [:] }
+-        send = sender ?? { _, _ in }
+-        load = images ?? { _, completion in completion(nil, 0, 0) }
+-#endif
+         poll()
+         schedulePolling()
+     }
+@@ -91,9 +83,7 @@ struct CompanionMarker: Identifiable {
+     func visible(_ value: Bool) {
+         if !value && page == .bag { action("bag_cancel", 0) }
+         presented=value
+-        #if DM_COMPANION
+         native?.setVisible(value)
+-        #endif
+         schedulePolling();if value {poll()}
+     }
+     func setPresentation(controlsHidden: Bool, physicalController: Bool, presented: Bool) {
+@@ -168,18 +158,13 @@ struct ACNHCompanionView: View {
+ 
+ #if os(iOS)
+ // The front end embeds this hosting controller's view as the band under the picture (front_ios.m), with the touch pad floating above it. It inherits the
+-// game root's orientation policy; no canvas rotation is needed: the view is laid out by the root, not presented full screen. NULL for a game whose app
+-// defines no DM_COMPANION (build_ipa.sh defines it only where the profile has companion.json), which keeps the front end's empty band.
++// game root's orientation policy; no canvas rotation is needed: the view is laid out by the root, not presented full screen.
+ @MainActor @_cdecl("dm_companion_view_controller")
+-public func dmCompanionViewController() -> UnsafeMutableRawPointer? {
+-#if DM_COMPANION
++public func dmCompanionViewController() -> UnsafeMutableRawPointer {
+     let model = CompanionModel()
+     let controller = DmHostingController(rootView: ACNHCompanionView(model: model))
+     controller.view.backgroundColor = .clear
+     controller.view.clipsToBounds = true
+     return Unmanaged.passRetained(controller).toOpaque()
+-#else
+-    return nil
+-#endif
+ }
+ #endif
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index a5fdf2ab..95cdda0e 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -94,8 +94,11 @@ static void tv_attach(void);
+ @property (strong, nonatomic) UIWindow *window;
+ @end
+ 
+-// SwiftUI's companion (ACNHCompanion.swift): a hosting controller for the game's data-driven interface. NULL in a build without a companion.
++// SwiftUI's companion (ACNHCompanion.swift): a hosting controller for the game's data-driven interface. Only a build whose profile has companion.json
++// defines DM_COMPANION (build_ipa.sh) and compiles the renderer, so nothing refers to this symbol in the other games' apps.
++#if DM_COMPANION
+ extern void *dm_companion_view_controller(void);
++#endif
+ 
+ @interface DmRootVC : UIViewController
+ @property (nonatomic, strong) DmGameView *game;
+@@ -207,8 +210,12 @@ static void launcher_done(void) { [g_root startGame]; }
+     dm_haptics_apple_init();
+     // The band under the picture in a split (DmLayout.h dm_layout companion): the SwiftUI companion's view, with the pad floating over it. Hidden while
+     // there is no split: the picture takes the whole view and the pad's own background is all there is. The companion takes its own touches; the pad keeps
+-    // the ones that land on a key (DmGamepad.m hitTest). A game without a companion answers NULL and keeps the empty placeholder.
++    // the ones that land on a key (DmGamepad.m hitTest). A game without a companion keeps the empty placeholder.
++#if DM_COMPANION
+     UIViewController *companionVC = (__bridge_transfer UIViewController *)dm_companion_view_controller();
++#else
++    UIViewController *companionVC = nil;
++#endif
+     self.companionVC = companionVC;
+     self.companion = companionVC ? companionVC.view : [[UIView alloc] initWithFrame:CGRectZero];
+     self.companion.backgroundColor = [UIColor colorWithWhite:0.07 alpha:1];
+diff --git a/dm/ios/tests/duo/project.yml b/dm/ios/tests/duo/project.yml
+index a06313f3..d1088779 100644
+--- a/dm/ios/tests/duo/project.yml
++++ b/dm/ios/tests/duo/project.yml
+@@ -62,6 +62,7 @@ targets:
+           - $(SRCROOT)/../../Sources
+           - $(SRCROOT)/Sources/Fixtures
+         SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/../../Sources/DmIOS-Bridging-Header.h
++        GCC_PREPROCESSOR_DEFINITIONS: "$(inherited) DM_COMPANION=1"   # front_ios.m's band view: the harness's stubs stand in for the Swift companion
+         CLANG_ENABLE_OBJC_ARC: YES
+         CODE_SIGN_STYLE: Automatic
+         DEVELOPMENT_TEAM: ""
+diff --git a/dm/ios/tools/build_ipa.sh b/dm/ios/tools/build_ipa.sh
+index ccb788da..8fafe68d 100755
+--- a/dm/ios/tools/build_ipa.sh
++++ b/dm/ios/tools/build_ipa.sh
+@@ -213,7 +213,8 @@ LD=$(python3 -c 'import json, sys; print(next((s["default"] for s in json.load(o
+ if [ -n "$LD" ] && [ "$LD" != "$DM_LANG" ]; then t "game language: the game has no $DM_LANG; packing $LD, its first"; export DM_LANG=$LD; fi
+ # A profile's companion.json opts the game into the Eden Duo companion: the data-driven interface manifest and its authored MSBT strings are bundled as
+ # dm/companion-ui.json, the module's build-ID and input-gate configuration as dm/companion.json, and the component licenses beside it (a build that includes
+-# the companion is distributed under GPL-3.0-or-later, with its notices). Games without the file pack no companion and link none.
++# the companion is distributed under GPL-3.0-or-later, with its notices). Only this game's app compiles the companion's Swift renderer: any other game's
++# leaves both files out, so its app carries neither the renderer nor the module (whose sources companion.mk adds to the host for this profile alone).
+ if [ -f "$GD/companion.json" ]; then
+   cp "$GD/companion.json" Gen/dm/companion.json || die "copy companion profile"
+   python3 "$IOS/tools/gen_companion.py" "$DM/third_party/eden_duo/acnh" Gen/dm/companion-ui.json || die "generate companion interface"
+@@ -221,9 +222,11 @@ if [ -f "$GD/companion.json" ]; then
+   mkdir -p Gen/dm/companion-licenses || die "make companion notices directory"
+   cp "$DM"/third_party/eden_duo/LICENSE-*.txt "$DM/third_party/eden_duo/NOTICES.txt" "$DM/third_party/eden_duo/UPSTREAM.json" Gen/dm/companion-licenses/ || die "copy companion notices"
+   cp "$DM/third_party/zstd/LICENSE" Gen/dm/companion-licenses/LICENSE-ZSTD.txt || die "copy Zstandard license"
+-  # Swift compiles the companion renderer only for this game: the other games' apps link no DMCompanion and would fail on the Swift reference.
+-  echo "SWIFT_ACTIVE_COMPILATION_CONDITIONS = \$(inherited) DM_COMPANION" >> Gen/dm.xcconfig
++  echo "GCC_PREPROCESSOR_DEFINITIONS = \$(inherited) DM_COMPANION=1" >> Gen/dm.xcconfig   # front_ios.m calls the companion's view controller only under it
+   t "companion: interface, profile and licenses bundled"
++else
++  # The renderer and its model have nothing to draw in a game without companion.json, so they stay out of that game's target.
++  echo "EXCLUDED_SOURCE_FILE_NAMES = \$(inherited) ACNHCompanion.swift EdenCompanion.swift" >> Gen/dm.xcconfig
+ fi
+ # Diagnostic build: DM_ENV_FILE=file → dm/env.txt in the bundle (main.m sets one environment variable per line at boot)
+ if [ -n "${DM_ENV_FILE:-}" ]; then cp "$DM_ENV_FILE" Gen/dm/env.txt || die "copy DM_ENV_FILE"; t "env: $(grep -v '^#' "$DM_ENV_FILE" | tr '\n' ' ')"; fi

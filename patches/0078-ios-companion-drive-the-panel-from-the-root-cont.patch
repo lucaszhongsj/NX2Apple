@@ -1,0 +1,197 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Mon, 16 Nov 2026 19:35:46 +0800
+Subject: [PATCH] ios/companion: drive the panel from the root controller
+
+The band was shown, but nothing told the companion about it: the module
+kept sampling in every orientation and the panel never heard about the
+safe area or a controller in use.
+
+The root controller now reports presentation (split, app active),
+whether the touch pad is hidden by a physical controller, and the band's
+safe-area insets on every layout and on foreground/background changes;
+the hosting controller joins the root as a child so appearance callbacks
+and safe-area propagation follow containment. A controller joining
+requests a new layout, so the state reaches the panel without waiting
+for some other layout event, and the two app-state observers exist only
+in a build with the companion.
+
+Upstream-Status: pending
+Reason: the ACNH companion's band needs the root controller's presentation and safe-area state; nxnative carries it on feat/acnh-companion
+Issue: none yet: no upstream issue for the companion
+
+---
+ dm/ios/Sources/ACNHCompanion.swift         | 18 ++++++++++
+ dm/ios/Sources/DmGamepad.m                 |  5 ++-
+ dm/ios/Sources/DmLayout.h                  |  1 +
+ dm/ios/Sources/front_ios.m                 | 39 +++++++++++++++++++++-
+ dm/ios/tests/duo/Sources/DuoRuntimeStubs.m |  2 ++
+ 5 files changed, 63 insertions(+), 2 deletions(-)
+
+diff --git a/dm/ios/Sources/ACNHCompanion.swift b/dm/ios/Sources/ACNHCompanion.swift
+index e2f74a0b..ed22f665 100644
+--- a/dm/ios/Sources/ACNHCompanion.swift
++++ b/dm/ios/Sources/ACNHCompanion.swift
+@@ -158,11 +158,29 @@ struct ACNHCompanionView: View {
+ }
+ 
+ #if os(iOS)
++@MainActor private weak var activeCompanionModel: CompanionModel?
++
++// front_ios.m: whether the band is shown, a physical controller is in use, and the pad is hidden, and the safe-area parts of the
++// band its content must avoid (home indicator, notch). The front end owns these; the renderer only reacts to them.
++@MainActor @_cdecl("dm_companion_ui_state")
++public func dmCompanionUIState(_ hidden: Int32, _ physical: Int32, _ presented: Int32) {
++    guard let model = activeCompanionModel else { return }
++    model.setPresentation(controlsHidden: hidden != 0, physicalController: physical != 0, presented: presented != 0)
++}
++
++@MainActor @_cdecl("dm_companion_ui_dock_insets")
++public func dmCompanionUIDockInsets(_ left: Double, _ right: Double, _ bottom: Double) {
++    guard let model = activeCompanionModel else { return }
++    let insets = EdgeInsets(top: 0, leading: left, bottom: bottom, trailing: right)
++    if model.dockInsets != insets { model.dockInsets = insets }
++}
++
+ // The front end embeds this hosting controller's view as the band under the picture (front_ios.m), with the touch pad floating above it. It inherits the
+ // game root's orientation policy; no canvas rotation is needed: the view is laid out by the root, not presented full screen.
+ @MainActor @_cdecl("dm_companion_view_controller")
+ public func dmCompanionViewController() -> UnsafeMutableRawPointer {
+     let model = CompanionModel()
++    activeCompanionModel = model
+     let controller = DmHostingController(rootView: ACNHCompanionView(model: model))
+     controller.view.backgroundColor = .clear
+     controller.view.clipsToBounds = true
+diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
+index ffa85aaa..e43820db 100644
+--- a/dm/ios/Sources/DmGamepad.m
++++ b/dm/ios/Sources/DmGamepad.m
+@@ -141,6 +141,7 @@ void front_ios_quit_controllers(void);   // front_ios.m: the controllers changed
+ - (BOOL)reduceMotionEnabled;
+ - (void)wakeMenu;
+ - (void)setMenuOpen:(BOOL)open;
++- (BOOL)controllerConnected;
+ @end
+ // The menu button: a UIButton whose menu is the in-game menu (UIKit draws it and takes the touches while it is open). Its hit circle is larger than the drawn one, and a key nearer
+ // to the touch wins (− / + sit beside it), so it asks the pad
+@@ -857,8 +858,9 @@ static BOOL pads_slotted(GCController *gone) {
+     GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
+     if (c && (!c.extendedGamepad || g_merge)) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
+     BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
+-    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; [self updateControlVisibility]; [self reset]; front_ios_quit_controllers(); });   // the touch gamepad hides while any controller is in use
++    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; [self updateControlVisibility]; [self reset]; front_ios_quit_controllers(); [self.superview setNeedsLayout]; });   // the touch gamepad hides while any controller is in use; the root view lays out again so the companion hears about it
+ }
++- (BOOL)controllerConnected { return _padOff; }
+ @end
+ 
+ // The controller applet's prompt (front.h front_ctrl_support, ctrl_prompt.h; GitHub issue #1640), as the Mac's (front_mac.m): the game asked for more players than it sees, and
+@@ -966,6 +968,7 @@ int front_ctrl_support(int min, int max) {
+ }
+ 
+ UIView *dm_gamepad_view(CGRect frame) { DmGamepad *v = [[DmGamepad alloc] initWithFrame:frame]; g_view = v; return v; }
++int dm_gamepad_controller_connected(void) { return g_view && [g_view controllerConnected] ? 1 : 0; }
+ void dm_gamepad_arrange(UIView *view, DmLayout layout) { [(DmGamepad *)view arrange:layout]; }
+ void dm_gamepad_opmode_changed(void) { [g_view opmodeChanged]; }
+ void dm_gamepad_touch_feedback(bool on) { [g_view setTouchFeedback:on]; }
+diff --git a/dm/ios/Sources/DmLayout.h b/dm/ios/Sources/DmLayout.h
+index 3bc79ec1..2bdea324 100644
+--- a/dm/ios/Sources/DmLayout.h
++++ b/dm/ios/Sources/DmLayout.h
+@@ -106,5 +106,6 @@ UIView *dm_gamepad_view(CGRect frame);
+ void dm_gamepad_arrange(UIView *view, DmLayout layout);
+ void dm_gamepad_reset(void);
+ void dm_gamepad_opmode_changed(void);   // the console mode changed (the in-game menu, a TV): the Tap layout exists only in handheld mode
++int dm_gamepad_controller_connected(void);   // a physical controller is in use: the touch gamepad is off (DmGamepad.m padsChanged)
+ 
+ NS_ASSUME_NONNULL_END
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index 95cdda0e..6bfc5309 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -98,6 +98,8 @@ static void tv_attach(void);
+ // defines DM_COMPANION (build_ipa.sh) and compiles the renderer, so nothing refers to this symbol in the other games' apps.
+ #if DM_COMPANION
+ extern void *dm_companion_view_controller(void);
++void dm_companion_ui_state(int hidden, int physical, int presented);   // ACNHCompanion.swift: band shown, controller in use, pad hidden
++void dm_companion_ui_dock_insets(double left, double right, double bottom);   // the band's parts under the safe area
+ #endif
+ 
+ @interface DmRootVC : UIViewController
+@@ -142,6 +144,10 @@ static void launcher_done(void) { [g_root startGame]; }
+             [weakSelf hingeChanged:update.hinge];
+         }]];
+     }
++#endif
++#if DM_COMPANION
++    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appStateChanged:) name:UIApplicationWillResignActiveNotification object:nil];
++    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appStateChanged:) name:UIApplicationDidBecomeActiveNotification object:nil];
+ #endif
+     front_ios_power_watch();
+     front_ios_notify_setup();
+@@ -220,7 +226,13 @@ static void launcher_done(void) { [g_root startGame]; }
+     self.companion = companionVC ? companionVC.view : [[UIView alloc] initWithFrame:CGRectZero];
+     self.companion.backgroundColor = [UIColor colorWithWhite:0.07 alpha:1];
+     self.companion.hidden = YES;
+-    [self.view addSubview:self.companion];
++    if (companionVC) {   // a child, not only a subview: SwiftUI's appearance callbacks and safe-area propagation follow containment
++        [self addChildViewController:companionVC];
++        [self.view addSubview:companionVC.view];
++        [companionVC didMoveToParentViewController:self];
++    } else {
++        [self.view addSubview:self.companion];
++    }
+     self.pad = dm_gamepad_view(self.view.bounds);
+     self.pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+     [self.view addSubview:self.pad];
+@@ -249,6 +261,16 @@ static UIWindow *g_tv;   // the TV scene's window while one shows the picture (t
+         if (dm_opmode() != m) { dm_set_opmode(m); dm_gamepad_opmode_changed(); LOG("front end: console mode %s again, lying down", m ? "docked" : "handheld"); }
+     }
+ }
++#if DM_COMPANION
++- (void)appStateChanged:(NSNotification *)note {   // the panel stops sampling while the app is in the background; the band is laid out again on return
++    if (!self.companionVC) return;
++    BOOL physical = dm_gamepad_controller_connected();
++    // The notification says which transition happened: applicationState may still read Active when WillResignActive arrives.
++    BOOL active = [note.name isEqualToString:UIApplicationDidBecomeActiveNotification];
++    dm_companion_ui_state(physical, physical, active && !self.companion.hidden);
++    [self.view setNeedsLayout];
++}
++#endif
+ - (void)viewDidLayoutSubviews {
+     [super viewDidLayoutSubviews];
+     CGRect b = self.view.bounds; if (!self.game) return;
+@@ -277,6 +299,21 @@ static UIWindow *g_tv;   // the TV scene's window while one shows the picture (t
+     if (@available(iOS 27.1, *)) hingeClosed = self.hingeStatus == UIHingeStatusClosed;
+ #endif
+     layout.customControlsFullBounds = dm_layout_custom_controls_full_bounds(b, hingeClosed);
++#if DM_COMPANION
++    if (self.companionVC) {   // the renderer follows the band's presentation (and stops sampling while it is hidden), and lays its content out of the safe area
++        BOOL physical = dm_gamepad_controller_connected();
++        BOOL presented = layout.separated && UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
++        dm_companion_ui_state(physical, physical, presented);
++        if (layout.separated) {
++            CGRect safe = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets);
++            dm_companion_ui_dock_insets(MAX(0, CGRectGetMinX(safe) - CGRectGetMinX(layout.companion)),
++                                        MAX(0, CGRectGetMaxX(layout.companion) - CGRectGetMaxX(safe)),
++                                        MAX(0, CGRectGetMaxY(layout.companion) - CGRectGetMaxY(safe)));
++        } else {
++            dm_companion_ui_dock_insets(0, 0, 0);
++        }
++    }
++#endif
+     NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? @"split" : self.fill ? @"overlay, Fill" : @"overlay",
+                       (long)self.hingeStatus, self.partiallyOpen ? " (half open)" : "", regionLog, NSStringFromCGRect(layout.game), NSStringFromCGRect(layout.controls)];
+     if (![line isEqualToString:self.layoutLog]) { self.layoutLog = line; LOG("front end: layout %s", line.UTF8String); }
+diff --git a/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m b/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
+index 47792b51..94f25ba0 100644
+--- a/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
++++ b/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
+@@ -122,6 +122,8 @@ void *dm_companion_view_controller(void) {
+     vc.view.backgroundColor = UIColor.clearColor;
+     return (__bridge_retained void *)vc;
+ }
++void dm_companion_ui_state(int hidden, int physical, int presented) { (void)hidden; (void)physical; (void)presented; }
++void dm_companion_ui_dock_insets(double left, double right, double bottom) { (void)left; (void)right; (void)bottom; }
+ int front_ios_boot_ok(void) { return 1; }
+ void front_ios_boot(void) {}
+ bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewController; (void)done; return false; }

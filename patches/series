@@ -72,3 +72,6 @@
 0074-ios-the-framework-project-compiles-the-companion.patch
 0075-ios-companion-the-renderer-reaches-the-adapter-t.patch
 0076-ios-the-shell-s-game-framework-compiles-the-comp.patch
+0077-host-companion-check-the-whole-batch-before-any.patch
+0078-ios-companion-drive-the-panel-from-the-root-cont.patch
+0079-build-companion-match-the-module-s-arithmetic-an.patch

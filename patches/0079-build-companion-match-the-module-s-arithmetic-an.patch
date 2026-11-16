@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Mon, 16 Nov 2026 19:35:50 +0800
+Subject: [PATCH] build/companion: match the module's arithmetic and its
+ license file
+
+The companion's reader is C++20 and its Mac build keeps
+-ffp-contract=off; the iOS app now sets both, so the same expressions
+round the same way on the phone as on the Mac. The module is
+GPL-3.0-or-later, so the merged build carries NOTICES-nxnative.md in the
+bundle. Companion objects are flattened into one directory, where two
+sources with the same base name would share one object silently: make
+now refuses that.
+
+Upstream-Status: pending
+Reason: the ACNH companion's build settings, license file and object-name check; nxnative carries it on feat/acnh-companion
+Issue: none yet: no upstream issue for the companion
+
+---
+ dm/host/Makefile          | 4 ++++
+ dm/ios/project.yml        | 1 +
+ dm/ios/tools/build_ipa.sh | 2 +-
+ 3 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/dm/host/Makefile b/dm/host/Makefile
+index 0397b334..1f7b1c8a 100644
+--- a/dm/host/Makefile
++++ b/dm/host/Makefile
+@@ -64,6 +64,10 @@ COMPANION_CXX_SRC = companion_apple.mm $(COMPANION_CXX)
+ COMPANION_C_SRC = $(COMPANION_C)
+ COMPANION_SRC = $(COMPANION_CXX_SRC) $(COMPANION_C_SRC)
+ COMPANION_OBJ = $(foreach s,$(COMPANION_SRC),$(COMPANION_DIR)/$(notdir $(basename $(s))).o)
++# Object names are flattened to one directory, so two sources with the same base name would silently share (and overwrite) one object.
++ifneq ($(words $(COMPANION_OBJ)),$(words $(sort $(COMPANION_OBJ))))
++$(error two companion sources share a base name: $(COMPANION_OBJ))
++endif
+ COMPANION_LIB = $(COMPANION_DIR)/libcompanion.a
+ COMPANION_DEFS = -DDM_HAS_COMPANION=1 -DZSTD_DISABLE_ASM=1 -DZSTD_LEGACY_SUPPORT=0
+ # One rule per source: a pattern rule cannot reach zstd's common/ and decompress/ subdirectories from a single % step.
+diff --git a/dm/ios/project.yml b/dm/ios/project.yml
+index b5f78181..4556fef0 100644
+--- a/dm/ios/project.yml
++++ b/dm/ios/project.yml
+@@ -83,6 +83,7 @@ targets:
+       ENABLE_BITCODE: NO
+       GCC_C_LANGUAGE_STANDARD: gnu11
+       CLANG_CXX_LANGUAGE_STANDARD: gnu++20   # the companion's reader is C++20: eden_duo's headers use std::span (dm/third_party/eden_duo/acnh/acnh_bytes.h)
++      OTHER_CPLUSPLUSFLAGS: $(inherited) -ffp-contract=off   # the companion's Mac build sets it (dm/host/Makefile): the same arithmetic on both
+       OTHER_CFLAGS: $(inherited) -mcpu=apple-m1   # the oldest chip the app supports (an M1 iPad; iPhones from the A17 Pro, as the games need BC textures), the Mac build's default too: it has the LSE atomics the host assembly uses, which the default baseline does not accept. Not newer: dav1d turns on every feature the target promises, and the A18 target (its I8MM) stopped an M1 iPad with SIGILL in the AV1 decoder (dm/ios/tests/test_cpu_target.py)
+       CLANG_ENABLE_OBJC_ARC: YES
+       SWIFT_VERSION: "5.0"                         # Launcher.swift (SwiftUI)
+diff --git a/dm/ios/tools/build_ipa.sh b/dm/ios/tools/build_ipa.sh
+index 6cb96edc..55a2f654 100755
+--- a/dm/ios/tools/build_ipa.sh
++++ b/dm/ios/tools/build_ipa.sh
+@@ -230,7 +230,7 @@ if [ -f "$GD/companion.json" ]; then
+   python3 "$IOS/tools/gen_companion.py" "$DM/third_party/eden_duo/$UI" Gen/dm/companion-ui.json || die "generate companion interface"
+   cp "$DM/third_party/eden_duo/LICENSE-GPL-3.0.txt" Gen/dm/companion-license.txt || die "copy companion license"
+   mkdir -p Gen/dm/companion-licenses || die "make companion notices directory"
+-  cp "$DM"/third_party/eden_duo/LICENSE-*.txt "$DM/third_party/eden_duo/NOTICES.txt" "$DM/third_party/eden_duo/UPSTREAM.json" Gen/dm/companion-licenses/ || die "copy companion notices"
++  cp "$DM"/third_party/eden_duo/LICENSE-*.txt "$DM/third_party/eden_duo/NOTICES.txt" "$DM/third_party/eden_duo/NOTICES-nxnative.md" "$DM/third_party/eden_duo/UPSTREAM.json" Gen/dm/companion-licenses/ || die "copy companion notices"
+   cp "$DM/third_party/zstd/LICENSE" Gen/dm/companion-licenses/LICENSE-ZSTD.txt || die "copy Zstandard license"
+   echo "GCC_PREPROCESSOR_DEFINITIONS = \$(inherited) DM_COMPANION=1" >> Gen/dm.xcconfig   # front_ios.m calls the companion's view controller only under it
+   t "companion: interface, profile and licenses bundled"

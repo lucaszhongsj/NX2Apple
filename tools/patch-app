@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# Apply this fork's own engine patches to the engine of an installed NX2Apple.app, and sign the app again.
+#   tools/patch-app                    apply the patches listed in the branch's patches/local
+#   tools/patch-app --patches 0056 0057 0058   apply these patches instead
+#   tools/patch-app --tree             build the branch's engine with tools/engine.py tree and install that instead
+#   tools/patch-app --dry-run          check the patches against the app's engine, change nothing
+#   tools/patch-app --restore          put the app's own engine back
+#   tools/patch-app --from BRANCH      where the patches live (default: local)
+#   tools/patch-app --app PATH         the installed app (default: /Applications/NX2Apple.app)
+#   tools/patch-app --repo PATH        the repository (default: this script's checkout, else ~/github.com/lucaszhongsj/NX2Apple)
+#
+# The patches are read from BRANCH (git objects), not from the checkout, so the branch you are on does not matter:
+# switch to main to work, and run this from there. patches/local in that branch is the list, one name per line; a
+# patch added there is applied by the next run. Without such a branch the checkout's patches/local is used, then the
+# series' fork-only patches. Every patch is dry-run first: one that does not fit the app's engine stops the run before
+# anything changes. The app's own engine is kept in ~/Library/Application Support/nx2-wide-engine/engine-backup.
+set -euo pipefail
+
+ROOT=${NX2_REPO:-}
+if [ -z "$ROOT" ]; then
+    ROOT=$(cd "$(dirname "$0")/.." && pwd)
+    [ -f "$ROOT/tools/engine.py" ] || ROOT=$HOME/github.com/lucaszhongsj/NX2Apple
+fi
+APP=${NX2_APP:-/Applications/NX2Apple.app}
+BRANCH=${NX2_LOCAL_BRANCH:-local}
+SERIES=$ROOT/patches/series
+BACKUP="$HOME/Library/Application Support/nx2-wide-engine/engine-backup"
+MODE=install
+WANTED=""
+DRY=0
+TREE=0
+
+usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+die() { echo "patch-app: $*" >&2; exit 1; }
+note() { echo "patch-app: $*"; }
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --restore) MODE=restore; shift ;;
+        --dry-run) DRY=1; shift ;;
+        --tree) TREE=1; shift ;;
+        --from) BRANCH=${2:?--from needs a branch}; shift 2 ;;
+        --app) APP=${2:?--app needs a path}; shift 2 ;;
+        --repo) ROOT=${2:?--repo needs a path}; shift 2 ;;
+        --patches) shift; while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do WANTED="$WANTED $1"; shift; done ;;
+        -h|--help) usage 0 ;;
+        *) usage 1 ;;
+    esac
+done
+
+ENGINE="$APP/Contents/Resources/engine"
+[ -d "$ENGINE" ] || die "no engine at $ENGINE (--app PATH)"
+BUNDLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist" 2>/dev/null || true)
+[ "$BUNDLE" = "org.nxnative.NSPortBuilder" ] || die "$APP is not the NX2Apple app (bundle id: ${BUNDLE:-none})"
+if [ "$DRY" = 0 ] && pgrep -x NSPortBuilder >/dev/null; then die "quit NX2Apple first: it is running"; fi
+
+# Signs the app; false when the signature does not verify, so the caller decides what a failure means.
+sign() {
+    codesign --force --deep -s - "$APP" >/dev/null 2>&1 && codesign --verify --deep --strict "$APP" >/dev/null 2>&1
+}
+
+restore_engine() { /bin/rm -rf "$ENGINE"; ditto "$BACKUP" "$ENGINE"; }
+
+# Keep the app's own engine for --restore. A backup of the same engine id is kept as it is: it was made before any
+# patch went on, so overwriting it with the patched tree would leave no way back.
+keep_backup() {
+    local id=$1
+    mkdir -p "$(dirname "$BACKUP")"
+    if [ -d "$BACKUP" ] && [ "$(cat "$BACKUP/.engine-id" 2>/dev/null || true)" = "$id" ]; then return 0; fi
+    /bin/rm -rf "$BACKUP"
+    ditto "$ENGINE" "$BACKUP"
+    note "kept the app's own engine ($id) for --restore"
+}
+
+if [ "$MODE" = restore ]; then
+    [ -d "$BACKUP" ] || die "no backup at $BACKUP"
+    restore_engine
+    sign || die "signing $APP failed after the restore"
+    note "restored the app's own engine; restart NX2Apple"
+    exit 0
+fi
+
+# --tree: the app's engine is on another pin, so the patches cannot go on it. Build the branch's whole engine
+# instead (a worktree of BRANCH, where engine.py sync and tree see its series) and replace the app's tree with it.
+if [ "$TREE" = 1 ]; then
+    if [ "$DRY" = 1 ]; then note "--tree builds; --dry-run checks patches only"; exit 0; fi
+    WT=$(mktemp -d "${TMPDIR:-/tmp}/patch-app-tree.XXXXXX")
+    cleanup_tree() { git -C "$ROOT" worktree remove --force "$WT" >/dev/null 2>&1 || true; /bin/rm -rf "$WT"; }
+    trap 'cleanup_tree' EXIT
+    note "building $BRANCH's engine with tools/engine.py tree"
+    git -C "$ROOT" worktree add -q --detach "$WT" "$BRANCH" || die "no branch $BRANCH in $ROOT"
+    NX2APPLE_ENGINE_URL=${NX2APPLE_ENGINE_URL:-$ROOT/engine} python3 "$WT/tools/engine.py" sync \
+        || die "engine sync failed in $WT"
+    python3 "$WT/tools/engine.py" tree --out "$WT/tree" >/dev/null || die "engine tree failed"
+    NEW=$(cat "$WT/tree/.engine-id")
+    OLD=$(cat "$ENGINE/.engine-id" 2>/dev/null || true)
+    if [ "$NEW" = "$OLD" ]; then note "the app already carries this engine ($NEW)"; exit 0; fi
+    keep_backup "$OLD"
+    /bin/rm -rf "$ENGINE"
+    ditto "$WT/tree" "$ENGINE"
+    [ -n "$OLD" ] && /bin/rm -rf "$HOME/Library/Application Support/NX2Apple/engine/$OLD"
+    if ! sign; then
+        restore_engine
+        sign || true
+        die "signing failed; restored the app's own engine"
+    fi
+    note "done: engine $NEW (restart NX2Apple)"
+    exit 0
+fi
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/patch-app.XXXXXX")
+LIST=$WORK/list
+trap '/bin/rm -rf "$WORK"' EXIT
+
+series_text() { git -C "$ROOT" show "$BRANCH:patches/series" 2>/dev/null || cat "$SERIES"; }
+local_text() { git -C "$ROOT" show "$BRANCH:patches/local" 2>/dev/null || cat "$ROOT/patches/local" 2>/dev/null || true; }
+
+# A patch as the branch has it; the checkout's copy when the branch does not have the file.
+add_patch() {
+    if git -C "$ROOT" show "$BRANCH:patches/$1" > "$WORK/$1" 2>/dev/null; then
+        echo "$WORK/$1" >> "$LIST"
+    elif [ -f "$ROOT/patches/$1" ]; then
+        echo "$ROOT/patches/$1" >> "$LIST"
+    else
+        die "no patch $1 in $BRANCH, and none in this checkout"
+    fi
+}
+
+if [ -n "$WANTED" ]; then
+    for n in $WANTED; do
+        name=$(series_text | awk -v n="$n" 'index($0, n "-") == 1 { print; exit }')
+        [ -n "$name" ] || die "no patch $n in the series of $BRANCH"
+        add_patch "$name"
+    done
+else
+    : > "$LIST"
+    names=$(local_text)
+    if [ -z "$names" ]; then
+        series_text > "$WORK/series"
+        : > "$WORK/fork-only"
+        while IFS= read -r name; do
+            case $name in ''|'#'*) continue ;; esac
+            if git -C "$ROOT" show "$BRANCH:patches/$name" 2>/dev/null | grep -q '^Upstream-Status: *fork-only'; then
+                echo "$name" >> "$WORK/fork-only"
+            fi
+        done < "$WORK/series"
+        names=$(cat "$WORK/fork-only")
+        [ -n "$names" ] || die "no patches/local in $BRANCH: name the patches with --patches"
+    fi
+    for name in $names; do
+        case $name in ''|'#'*) continue ;; esac
+        add_patch "$name"
+    done
+    [ -s "$LIST" ] || die "patches/local in $BRANCH lists no patch"
+fi
+count=$(wc -l < "$LIST" | tr -d ' ')
+
+# patches/local must follow the series' order: another order can apply cleanly and still fail later.
+series_text > "$WORK/series"
+last=0
+while IFS= read -r f; do
+    name=$(basename "$f")
+    n=$(grep -n "^$name\$" "$WORK/series" | cut -d: -f1)
+    [ -n "$n" ] || die "$name is not in the series of $BRANCH"
+    [ "$n" -gt "$last" ] || die "patches/local is out of the series' order at $name"
+    last=$n
+done < "$LIST"
+
+# Dry-run every patch on the app's engine and report all of them: one failure must not hide the rest.
+note "checking $count patches from $BRANCH against the app's engine"
+bad=0
+while IFS= read -r f; do
+    name=$(basename "$f")
+    if out=$(cd "$ENGINE" && patch -p1 --dry-run --forward < "$f" 2>&1); then
+        printf '  fits     %s\n' "$name"
+    elif printf '%s' "$out" | grep -q 'previously applied'; then
+        printf '  applied  %s\n' "$name"; bad=1
+    else
+        printf '  mismatch %s\n' "$name"; bad=1
+    fi
+done < "$LIST"
+if [ "$bad" = 1 ]; then
+    die "not every patch can go on this engine: 'applied' means run --restore first; 'mismatch' means the app's engine is on another upstream pin (tools/engine.py tree replaces it)"
+fi
+note "$count patches from $BRANCH fit the app's engine"
+if [ "$DRY" = 1 ]; then note "dry run: nothing changed"; exit 0; fi
+
+OLD=$(cat "$ENGINE/.engine-id" 2>/dev/null || true)
+keep_backup "$OLD"
+
+while IFS= read -r f; do
+    if ! (cd "$ENGINE" && patch -p1 --forward -s < "$f"); then
+        restore_engine; sign || true
+        die "$(basename "$f") failed halfway; restored the app's own engine"
+    fi
+    note "applied $(basename "$f")"
+done < "$LIST"
+find "$ENGINE" -name '*.orig' -delete
+
+# The launcher seeds its bundled engine into the store unless the store already has that id: drop the old copy so the
+# patched tree is the one a build reads.
+if [ -n "$OLD" ]; then
+    /bin/rm -rf "$HOME/Library/Application Support/NX2Apple/engine/$OLD"
+    note "dropped the store's copy of $OLD"
+fi
+
+if ! sign; then
+    restore_engine
+    sign || true
+    die "signing failed; restored the app's own engine"
+fi
+note "done: restart NX2Apple"

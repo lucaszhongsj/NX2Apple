@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Tue, 17 Nov 2026 07:08:34 +0800
+Subject: [PATCH] ios: keep the game's touches in the Tap layout
+
+Only the panel's own band passes through in Tap; picture touches still reach the pad, which forwards them to the game's touch screen.
+
+Upstream-Status: fork-only
+Reason: Tap forwards picture touches to the game while letting the panel take its own
+Issue: none yet: no upstream issue for the companion
+
+---
+ dm/ios/Sources/DmGamepad.m               |  3 ++-
+ dm/ios/tests/duo/Tests/DuoHarnessTests.m | 11 +++++++----
+ 2 files changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
+index 4049a063..87a01b11 100644
+--- a/dm/ios/Sources/DmGamepad.m
++++ b/dm/ios/Sources/DmGamepad.m
+@@ -451,7 +451,8 @@ int front_web_touch(void);
+         if (_padOff && !_layout.onTV && e && e.type == UIEventTypeTouches) [self wakeMenu];
+         return nil;
+     }
+-    if (_tap) return nil;   // Tap hides the pad: every touch goes to the game or the panel, so the panel is tappable here
++    if (_tap && _layout.separated && CGRectContainsPoint(_layout.companion, p)) return nil;   // Tap: the hidden pad lets the panel take its own touches
++    // Tap keeps the picture's touches: the pad forwards them to the game's touch screen, its only input in that layout.
+     if (_layout.separated && CGRectContainsPoint(_layout.controls, p)) return self;   // 3D owns the whole band: the panel below is not tappable
+     return v;
+ }
+diff --git a/dm/ios/tests/duo/Tests/DuoHarnessTests.m b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+index b18a80d6..c5a71d0f 100644
+--- a/dm/ios/tests/duo/Tests/DuoHarnessTests.m
++++ b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+@@ -344,16 +344,19 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     XCTAssertTrue(CGRectContainsPoint(layout.companion, clear) && CGRectContainsPoint(layout.controls, clear),
+                   @"The pad floats over the whole band: clear %@, companion %@, controls %@", NSStringFromCGPoint(clear), NSStringFromCGRect(layout.companion), NSStringFromCGRect(layout.controls));
+     XCTAssertEqual([pad hitTest:clear withEvent:nil], pad, @"3D: a clear point stays with the pad, the panel is not tappable");
+-    // Tap hides the pad: the same point goes through to the panel
++    // Tap hides the pad over the panel: the panel takes its own touches there
+     [pad setValue:@YES forKey:@"tap"];
+-    XCTAssertNil([pad hitTest:clear withEvent:nil], @"Tap: the pad is hidden, the panel below receives the tap");
++    XCTAssertNil([pad hitTest:clear withEvent:nil], @"Tap: the panel below receives the tap");
++    // Tap keeps the picture's touches: the pad forwards them to the game's touch screen, its only input in this layout
++    CGPoint picture = CGPointMake(CGRectGetMidX(layout.game), CGRectGetMidY(layout.game));
++    XCTAssertEqual([pad hitTest:picture withEvent:nil], pad, @"Tap: a picture touch stays with the pad for the game");
+     [pad setValue:@NO forKey:@"tap"];
+-    // Landscape has no band: the 3D pad keeps the whole view, the Tap pad passes it on
++    // Landscape has no band: the pad keeps the whole view in both layouts so the game keeps its touches
+     DmLayout overlay = dm_layout(CGRectMake(0, 0, 844, 390), UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+     UIView *landscapePad = [self padForLayout:overlay bounds:CGRectMake(0, 0, 844, 390)];
+     XCTAssertEqual([landscapePad hitTest:CGPointMake(8, 8) withEvent:nil], landscapePad, @"3D: with no split the pad owns the view");
+     [landscapePad setValue:@YES forKey:@"tap"];
+-    XCTAssertNil([landscapePad hitTest:CGPointMake(8, 8) withEvent:nil], @"Tap: the landscape pad passes the tap on");
++    XCTAssertEqual([landscapePad hitTest:CGPointMake(8, 8) withEvent:nil], landscapePad, @"Tap: the pad keeps landscape touches for the game");
+ }
+ 
+ - (void)testProductionRootPutsThePanelUnderThePadAndOutOfItsWay {

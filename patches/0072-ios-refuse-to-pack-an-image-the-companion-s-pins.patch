@@ -1,0 +1,157 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Mon, 16 Nov 2026 14:37:33 +0800
+Subject: [PATCH] ios: refuse to pack an image the companion's pins were not
+ found on
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A game update changes the rewritten main, the module's pinned addresses no
+longer hold, and the only symptom is an empty band. build_ipa.sh now checks
+the image it embeds — program 0's, the one gen_embed.py links — against the
+vendored module's *_pins.inc files before it bundles the companion, and
+refuses an image whose build ID is not among companion.json's write_builds:
+the pin check proves the addresses, the build gate proves the host will open
+the module's domains. The module's directory comes from companion.json's ui,
+so the script no longer names acnh.
+
+test_companion_pack.py runs the gate as build_ipa.sh holds it, slicing the
+block's text between markers so the test follows the script, over synthetic
+images: a matching image, one changed word, a build the host does not open,
+an image without its cuts file, and a module without pin files.
+
+Not checked: a full build_ipa.sh run (this NSP folder has no RomFS, host or
+font files, so check_program fails before the gate) and lint_python.py (no
+venv with the pinned lint requirements on this machine).
+
+Upstream-Status: pending
+Reason: The ACNH companion's pins: a tool that checks a rewritten image and the pack step that refuses one they were not found on; nxnative carries them on feat/acnh-companion
+Issue: none yet: no upstream issue for the companion
+
+---
+ dm/games/01006F8002326000/README.md |  2 +-
+ dm/ios/tests/test_companion_pack.py | 76 +++++++++++++++++++++++++++++
+ dm/ios/tools/build_ipa.sh           | 12 ++++-
+ 3 files changed, 88 insertions(+), 2 deletions(-)
+ create mode 100644 dm/ios/tests/test_companion_pack.py
+
+diff --git a/dm/games/01006F8002326000/README.md b/dm/games/01006F8002326000/README.md
+index c4c50677..f154831f 100644
+--- a/dm/games/01006F8002326000/README.md
++++ b/dm/games/01006F8002326000/README.md
+@@ -77,7 +77,7 @@ The module reads the guest through the host's own heap access (`dm_companion_gue
+ 
+ A pocket move reaches the save the game writes, so a snapshot taken before reorganizing is the way back: the save sync keeps its last ten backups of each side (`save_sync.c`, unchanged), and restoring one needs the game fully quit.
+ 
+-**Checked:** all 91 code pins match the rewritten main image of build `ff1d1c05670db6021c85b624a710b963`, the build `companion.json` writes on, at their main-relative offsets, so the module's domains open on it. `python3 dm/tools/companion_pins.py <NSP folder>/01006F8002326000_build/patched_v<version>/main.patched.bin dm/third_party/eden_duo/acnh/acnh_live_pins.inc dm/third_party/eden_duo/acnh/acnh_bag_pins.inc` repeats the check: it reads the build ID from the `main.cuts.tsv` `patch_nso.py` writes beside the image, and fails on a differing word, a pin past the image's end, a line that is not a pin, or a `.inc` generated from another build. **Not yet seen on a device:** how its 1240x1080 canvas fits a 390x566 band, and whether the pad stays legible over the panel. The pad can be put away in the meantime (the in-game menu's *Controller layout* → *Tap*), which leaves the panel the whole band. The Duo harness covers the band's hit testing with a stand-in view, not the panel.
++**Checked:** all 91 code pins match the rewritten main image of build `ff1d1c05670db6021c85b624a710b963`, the build `companion.json` writes on, at their main-relative offsets, so the module's domains open on it. `python3 dm/tools/companion_pins.py <NSP folder>/01006F8002326000_build/patched_v<version>/main.patched.bin dm/third_party/eden_duo/acnh/acnh_live_pins.inc dm/third_party/eden_duo/acnh/acnh_bag_pins.inc` repeats the check: it reads the build ID from the `main.cuts.tsv` `patch_nso.py` writes beside the image, and fails on a differing word, a pin past the image's end, a line that is not a pin, or a `.inc` generated from another build. `build_ipa.sh` runs the same check on the image the app embeds before it packs, and also refuses an image whose build ID is not among `companion.json`'s `write_builds`, so a game update cannot close the module's domains silently. **Not yet seen on a device:** how its 1240x1080 canvas fits a 390x566 band, and whether the pad stays legible over the panel. The pad can be put away in the meantime (the in-game menu's *Controller layout* → *Tap*), which leaves the panel the whole band. The Duo harness covers the band's hit testing with a stand-in view, not the panel.
+ 
+ ## Mac routes
+ 
+diff --git a/dm/ios/tests/test_companion_pack.py b/dm/ios/tests/test_companion_pack.py
+new file mode 100644
+index 00000000..f50740da
+--- /dev/null
++++ b/dm/ios/tests/test_companion_pack.py
+@@ -0,0 +1,76 @@
++"""The companion gate of build_ipa.sh: an image its pins were not found on must stop the pack.
++
++The tool's own parsing and comparison are dm/tools/tests/test_companion_pins.py's; this runs the
++steps build_ipa.sh takes before it bundles the companion, on a synthetic image and pin file.
++"""
++import json
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++import unittest
++
++REPO = Path(__file__).resolve().parents[3]
++BUILD = 'ff1d1c05670db6021c85b624a710b963'
++PINS = f'''// Generated from the build (build {BUILD[:16]}).
++inline const Pin PinSaveMgr{{"SaveMgr", 0x10, {{0x11111111, 0x22222222}}}};
++'''
++
++
++def block():
++    """The gate as build_ipa.sh runs it, between the companion profile's first use and its copy."""
++    script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
++    return script[script.index('UI=$(python3'):script.index('cp "$GD/companion.json"')]
++
++
++class CompanionPackTests(unittest.TestCase):
++    def run_gate(self, root, write_builds=(BUILD,), words=(0x11111111, 0x22222222), cuts=True, pins=True):
++        dm, gd, patched = root / 'dm', root / 'profile', root / 'patched'
++        vendor = dm / 'third_party' / 'eden_duo' / 'acnh'
++        (dm / 'tools').mkdir(parents=True); vendor.mkdir(parents=True); gd.mkdir(); patched.mkdir()
++        (dm / 'tools' / 'companion_pins.py').symlink_to(REPO / 'dm/tools/companion_pins.py')
++        if pins: (vendor / 'x_pins.inc').write_text(PINS)
++        (gd / 'companion.json').write_text(json.dumps({'ui': 'acnh', 'write_builds': list(write_builds)}))
++        image = bytearray(0x18); image[0x10:0x18] = b''.join(w.to_bytes(4, 'little') for w in words)
++        (patched / 'main.patched.bin').write_bytes(image)
++        if cuts: (patched / 'main.cuts.tsv').write_text(f'# BUILD_ID\t{BUILD}\n')
++        env = {k: v for k, v in os.environ.items() if k not in ('DM_GAMES_DIR', 'DM_GAMES_FIRST')}
++        env.update(DM=str(dm), GD=str(gd), PATCHED=str(patched))
++        return subprocess.run(['/bin/bash', '-c', 'set -u\ndie() { echo "$*" >&2; exit 1; }\n' + block()],
++                              env=env, capture_output=True, text=True)
++
++    def test_the_image_the_pins_were_found_on_packs(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            r = self.run_gate(Path(temporary))
++            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
++            self.assertIn('1 pin matches', r.stdout)
++
++    def test_a_differing_word_stops_the_pack(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            r = self.run_gate(Path(temporary), words=(0x11111111, 0xdeadbeef))
++            self.assertNotEqual(r.returncode, 0)
++            self.assertIn('is not the image the pins were found on', r.stderr)
++            self.assertIn('SaveMgr', r.stdout)
++
++    def test_a_build_the_host_does_not_open_stops_the_pack(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            r = self.run_gate(Path(temporary), write_builds=('0' * 32,))
++            self.assertNotEqual(r.returncode, 0)
++            self.assertIn('write_builds', r.stderr)
++
++    def test_an_image_without_its_build_id_stops_the_pack(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            r = self.run_gate(Path(temporary), cuts=False)
++            self.assertNotEqual(r.returncode, 0)
++            self.assertIn('the build ID is not checked', r.stderr)
++            self.assertIn('build unknown', r.stderr)
++
++    def test_a_game_without_pin_files_stops_the_pack(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            r = self.run_gate(Path(temporary), pins=False)
++            self.assertNotEqual(r.returncode, 0)
++            self.assertIn('no *_pins.inc', r.stderr)
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/dm/ios/tools/build_ipa.sh b/dm/ios/tools/build_ipa.sh
+index 8fafe68d..6cb96edc 100755
+--- a/dm/ios/tools/build_ipa.sh
++++ b/dm/ios/tools/build_ipa.sh
+@@ -216,8 +216,18 @@ if [ -n "$LD" ] && [ "$LD" != "$DM_LANG" ]; then t "game language: the game has
+ # the companion is distributed under GPL-3.0-or-later, with its notices). Only this game's app compiles the companion's Swift renderer: any other game's
+ # leaves both files out, so its app carries neither the renderer nor the module (whose sources companion.mk adds to the host for this profile alone).
+ if [ -f "$GD/companion.json" ]; then
++  # The module reads the game's memory through addresses its pins state, and the host opens its domains only for the builds companion.json names: a game build other than the one
++  # the pins were found on makes both disagree with the image this app embeds, and an empty panel is the only symptom. Refuse to pack such an image (program 0's: a PROGRAMS_TSV
++  # build's companion profile is the first program's).
++  UI=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["ui"])' "$GD/companion.json") || die "$GD/companion.json: no ui"
++  PINS=("$DM/third_party/eden_duo/$UI"/*_pins.inc)
++  [ -e "${PINS[0]}" ] || die "no *_pins.inc in $DM/third_party/eden_duo/$UI"
++  python3 "$DM/tools/companion_pins.py" "$PATCHED/main.patched.bin" "${PINS[@]}" || die "companion pins: $PATCHED/main.patched.bin is not the image the pins were found on"
++  BID=$([ -f "$PATCHED/main.cuts.tsv" ] && sed -n '1s/^# *BUILD_ID[[:space:]]*//p' "$PATCHED/main.cuts.tsv")
++  python3 -c 'import json, sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1])).get("write_builds", []) else 1)' "$GD/companion.json" "$BID" \
++    || die "companion: build ${BID:-unknown} is not among $GD/companion.json write_builds, so the host would keep the companion's domains closed"
+   cp "$GD/companion.json" Gen/dm/companion.json || die "copy companion profile"
+-  python3 "$IOS/tools/gen_companion.py" "$DM/third_party/eden_duo/acnh" Gen/dm/companion-ui.json || die "generate companion interface"
++  python3 "$IOS/tools/gen_companion.py" "$DM/third_party/eden_duo/$UI" Gen/dm/companion-ui.json || die "generate companion interface"
+   cp "$DM/third_party/eden_duo/LICENSE-GPL-3.0.txt" Gen/dm/companion-license.txt || die "copy companion license"
+   mkdir -p Gen/dm/companion-licenses || die "make companion notices directory"
+   cp "$DM"/third_party/eden_duo/LICENSE-*.txt "$DM/third_party/eden_duo/NOTICES.txt" "$DM/third_party/eden_duo/UPSTREAM.json" Gen/dm/companion-licenses/ || die "copy companion notices"

@@ -51,8 +51,11 @@
 0053-build-add-persistent-build-seeds-and-fast-refres.patch
 0054-mac-host-join-the-default-preferences-domain-at.patch
 0055-gfx-adaptive-ios-memory-pressure-convergence-for.patch
-0056-host-ios-render-a-wider-screen-in-its-own-shape.patch
-0057-host-touch-map-a-touch-on-a-wide-picture-back-on.patch
-0058-games-acnh-an-adaptive-view-adapter-on-the-frame.patch
-0059-ios-change-the-console-mode-from-the-in-game-men.patch
-0060-ios-record-the-launcher-that-built-an-app-dmbuil.patch
+0056-tools-shader-lib-a-failed-write-removes-its-part.patch
+0057-motion-a-controller-is-a-source-once-its-rotatio.patch
+0058-test-native-controller-motion-primes-the-adapter.patch
+0059-host-ios-render-a-wider-screen-in-its-own-shape.patch
+0060-host-touch-map-a-touch-on-a-wide-picture-back-on.patch
+0061-games-acnh-an-adaptive-view-adapter-on-the-frame.patch
+0062-ios-change-the-console-mode-from-the-in-game-men.patch
+0063-ios-record-the-launcher-that-built-an-app-dmbuil.patch

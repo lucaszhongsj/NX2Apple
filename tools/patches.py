@@ -46,7 +46,7 @@ class Fail(Exception):
 
 def clean_env(**extra):
     """The environment without the variables that point git at a repository."""
-    return {**{k: v for k, v in os.environ.items() if k not in REPO_ENV}, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8', **extra}
+    return {**{k: v for k, v in os.environ.items() if k not in REPO_ENV}, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8', 'LC_ALL': 'C', **extra}
 
 
 def git(*a, cwd=None, check=True, inp=None, binary=False):

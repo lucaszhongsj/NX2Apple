@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Open a locally built NX2Apple (tools/try-local) on the engine tree the app carries.
+#
+#   tools/relaunch-local                 open ~/Applications/NX2Apple.app
+#   tools/relaunch-local --app DIR       open a copy built somewhere else
+#   tools/relaunch-local --purge         remove the store's engine trees for other ids first
+#   tools/relaunch-local --print         print the command and what --purge would remove
+#
+# Why not plain `open`: the launcher keeps the engine it chose in
+# ~/Library/Application Support/NX2Apple/engine/<engine_id>/ and replaces it only when the stable
+# channel sees a newer app version. A try-local build keeps appVersion the same, so a new engine_id
+# alone does not move it (EngineSyncStore.prepareEngine). -engineID does: the store has no usable
+# folder for that id, so the launcher copies the app's own tree into it on the first start.
+#
+# A running NX2Apple shares settings and Application Support with the copy this opens: the script
+# stops there, as tools/try-local and tools/try-pr do.
+set -euo pipefail
+
+APP=${NX2APPLE_LOCAL_APP:-$HOME/Applications/NX2Apple.app}
+STORE=$HOME/Library/Application\ Support/NX2Apple/engine
+BUNDLE=org.nxnative.NSPortBuilder
+
+usage() { sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+die() { echo "relaunch-local: $*" >&2; exit 1; }
+note() { echo "relaunch-local: $*"; }
+is_engine_id() { [[ $1 =~ ^[0-9a-f]{7,64}-[0-9a-f]{12}$ ]]; }
+
+purge=0 print=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help) usage 0 ;;
+        --app) [ $# -ge 2 ] || usage 1; APP=$2; shift ;;
+        --purge) purge=1 ;;
+        --print) print=1 ;;
+        *) usage 1 ;;
+    esac
+    shift
+done
+
+[ -d "$APP" ] || die "no app at $APP (build one with tools/try-local --no-open --dir DIR)"
+E=$APP/Contents/Resources/engine
+for f in scripts/build_ipa_from_nsp.py dm/tools/romfs_image.py .upstream-ref .engine-id; do
+    [ -f "$E/$f" ] || die "$E is not a complete engine tree ($f is missing): the launcher would ignore -engineID"
+done
+id=$(tr -d '[:space:]' < "$E/.engine-id")
+is_engine_id "$id" || die "$E names no engine ($(cat "$E/.engine-id"))"
+
+old=()
+if [ -d "$STORE" ]; then
+    for d in "$STORE"/*/; do
+        [ -d "$d" ] || continue
+        name=$(basename "$d")
+        is_engine_id "$name" || continue
+        [ "$name" = "$id" ] || old+=("$d")
+    done
+fi
+
+# The tree kept for a build that was already running is what --purge removes: pass no previous id then.
+args=(-autoUpdateApp '<false/>' -engineChannel stable -engineID "$id" -autoUpdateRepo '<false/>')
+mine=$(defaults read "$BUNDLE" engineID 2> /dev/null || true)
+if [ "$purge" = 0 ] && [ -n "$mine" ] && [ "$mine" != "$id" ]; then args+=(-enginePreviousID "$mine"); fi
+
+if [ "$print" = 1 ]; then
+    note "engine_id $id ($E)"
+    printf 'open -n %q --args' "$APP"; printf ' %q' "${args[@]}"; echo
+    if [ "$purge" = 0 ]; then
+        note "other engine trees in the store stay (--purge removes them): ${old[*]:-none}"
+    elif [ ${#old[@]} -eq 0 ]; then
+        note "no other engine trees to remove"
+    else
+        for d in "${old[@]}"; do note "would remove $d"; done
+    fi
+    exit 0
+fi
+
+pgrep -x NSPortBuilder > /dev/null && die "NX2Apple is running: it shares settings and Application Support with this copy. Quit it and run this again"
+
+if [ "$purge" = 1 ] && [ ${#old[@]} -gt 0 ]; then
+    for d in "${old[@]}"; do
+        rm -rf "$d"
+        note "removed $d"
+    done
+fi
+
+if [ "$(defaults read "$BUNDLE" engineChannel 2> /dev/null || true)" = experimental ]; then
+    note "your installed app follows the experimental channel. This one saves stable: pick experimental again in Settings afterwards"
+fi
+
+note "opening $APP on engine $id"
+open -n "$APP" --args "${args[@]}"

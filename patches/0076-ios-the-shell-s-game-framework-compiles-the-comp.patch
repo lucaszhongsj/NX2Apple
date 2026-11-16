@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Mon, 16 Nov 2026 16:54:16 +0800
+Subject: [PATCH] ios: the shell's game framework compiles the companion's
+ renderer
+
+The ACNH framework left the split's band out of the link: front_ios.m calls
+dm_companion_view_controller under DM_COMPANION, and the renderer's Swift files
+were in the app target's Sources folder, which the shell's per-game framework
+target lists one file at a time (project-framework.yml). So the build stopped
+at "symbol(s) not found for architecture arm64" as soon as it linked.
+
+The three files join the DmShellGame target, through a bridging header of
+their own in place of DmGameMenu.h alone. A game without companion.json keeps
+them out: Gen/dm.xcconfig's EXCLUDED_SOURCE_FILE_NAMES drops the two renderer
+files by name, as it does for the app target.
+
+Upstream-Status: fork-only
+Reason: the per-game shell framework (patch 0039) is a fork product upstream declined, and this wiring is what its target needs for the companion
+Issue: none yet: no upstream issue for the companion
+---
+ dm/ios/Sources/DmShellGame-Bridging-Header.h | 7 +++++++
+ dm/ios/project-framework.yml                 | 8 +++++++-
+ 2 files changed, 14 insertions(+), 1 deletion(-)
+ create mode 100644 dm/ios/Sources/DmShellGame-Bridging-Header.h
+
+diff --git a/dm/ios/Sources/DmShellGame-Bridging-Header.h b/dm/ios/Sources/DmShellGame-Bridging-Header.h
+new file mode 100644
+index 00000000..cf34cde6
+--- /dev/null
++++ b/dm/ios/Sources/DmShellGame-Bridging-Header.h
+@@ -0,0 +1,7 @@
++// What the shell's game framework sees from Swift (project-framework.yml's DmShellGame, OTHER_SWIFT_FLAGS): the in-game
++// menu's calls into the host (DmGameMenu.h) and the companion's native engine, the band's model and renderer read
++// (companion_apple.h, companion_layout.h). The app's own bridging header (DmIOS-Bridging-Header.h) carries the launcher's
++// dependencies instead: the framework compiles neither Launcher.swift nor its cloud-save pickers.
++#import "DmGameMenu.h"
++#import "companion_apple.h"
++#include "companion_layout.h"
+diff --git a/dm/ios/project-framework.yml b/dm/ios/project-framework.yml
+index 26dad40f..32f745b4 100644
+--- a/dm/ios/project-framework.yml
++++ b/dm/ios/project-framework.yml
+@@ -155,6 +155,12 @@ targets:
+       - path: Sources/DmGamepad.m
+       - path: Sources/GameMenu.swift
+       - path: Sources/LauncherSettings.swift
++      # The split's band: front_ios.m calls dm_companion_view_controller under DM_COMPANION, which only a game with
++      # companion.json defines. Gen/dm.xcconfig's EXCLUDED_SOURCE_FILE_NAMES drops the two renderer files by name in the
++      # game that has none, as it does for the app target.
++      - path: Sources/ACNHCompanion.swift
++      - path: Sources/EdenCompanion.swift
++      - path: Sources/DmHostingController.swift
+       - path: Sources/CloudSaves.m
+       - path: Sources/SaveSync.m
+       - path: Sources/DataBookmark.m
+@@ -186,7 +192,7 @@ targets:
+       ENABLE_BITCODE: NO
+       GCC_C_LANGUAGE_STANDARD: gnu11
+       SWIFT_VERSION: "5.0"
+-      OTHER_SWIFT_FLAGS: $(inherited) -Xcc -include -Xcc "$(SRCROOT)/Gen/framework/objc_namespace.h" -import-objc-header "$(SRCROOT)/Sources/DmGameMenu.h"
++      OTHER_SWIFT_FLAGS: $(inherited) -Xcc -include -Xcc "$(SRCROOT)/Gen/framework/objc_namespace.h" -import-objc-header "$(SRCROOT)/Sources/DmShellGame-Bridging-Header.h"
+       OTHER_CFLAGS: $(inherited) -mcpu=apple-a18 -include "$(SRCROOT)/Gen/framework/objc_namespace.h"
+       OTHER_LDFLAGS: $(inherited) -framework UIKit -framework UserNotifications -Wl,-exported_symbols_list,"$(SRCROOT)/Gen/framework/exported_symbols.txt"
+       CLANG_ENABLE_OBJC_ARC: YES

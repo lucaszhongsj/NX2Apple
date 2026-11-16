@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Mon, 16 Nov 2026 16:54:11 +0800
+Subject: [PATCH] ios/companion: the renderer reaches the adapter through C
+
+A shell game framework's Swift imports none of the engine's classes: each
+framework renames them for its own image (gen_objc_namespace.py), so the
+renderer's DMCompanion is not the class its framework registers. The C bridge
+in companion_apple.h is what the renderer calls instead, as it already calls
+the host through DmGameMenu.h's functions. The adapter is the same object
+either way.
+
+Upstream-Status: pending
+Reason: The ACNH companion: Eden Duo's reader and the band a phone standing up shows it in; nxnative carries it on feat/acnh-companion
+Issue: none yet: no upstream issue for the companion
+---
+ dm/host/companion_apple.h          | 15 +++++++++++++++
+ dm/host/companion_apple.mm         | 11 +++++++++++
+ dm/ios/Sources/ACNHCompanion.swift | 23 ++++++++++++-----------
+ 3 files changed, 38 insertions(+), 11 deletions(-)
+
+diff --git a/dm/host/companion_apple.h b/dm/host/companion_apple.h
+index bce8c56b..f5eaa8f0 100644
+--- a/dm/host/companion_apple.h
++++ b/dm/host/companion_apple.h
+@@ -13,3 +13,18 @@ NS_ASSUME_NONNULL_BEGIN
+ - (void)image:(NSString *)key completion:(void (^)(NSData * _Nullable pixels,NSUInteger width,NSUInteger height))completion;
+ @end
+ NS_ASSUME_NONNULL_END
++// The renderer reaches the adapter through C, as it reaches the rest of the host (DmGameMenu.h): a shell game framework's
++// Swift imports no engine class, since gen_objc_namespace.py renames each one per framework. `engine` is the shared adapter,
++// NULL when the build carries no module; it lives for the process, so nothing releases it.
++#ifdef __cplusplus
++extern "C" {
++#endif
++void *_Nullable dm_companion_engine(void);
++void dm_companion_engine_start(void * _Nonnull engine);
++NSDictionary * _Nonnull dm_companion_engine_snapshot(void * _Nonnull engine);
++void dm_companion_engine_action(void * _Nonnull engine, const char * _Nonnull name, long long value);
++void dm_companion_engine_image(void * _Nonnull engine, const char * _Nonnull key, void (^ _Nonnull done)(NSData * _Nullable pixels, int width, int height));
++void dm_companion_engine_set_visible(void * _Nonnull engine, bool visible);
++#ifdef __cplusplus
++}
++#endif
+diff --git a/dm/host/companion_apple.mm b/dm/host/companion_apple.mm
+index 8b491c0b..328ee3de 100644
+--- a/dm/host/companion_apple.mm
++++ b/dm/host/companion_apple.mm
+@@ -345,3 +345,14 @@ static BOOL writePNG(NSData *rgba,NSUInteger w,NSUInteger h,NSString *path) {
+ }
+ @end
+ extern "C" void dm_companion_trace_start(const char *directory) { if(directory && *directory)[DMCompanion.shared trace:@(directory)]; }
++// What the renderer's Swift calls (companion_apple.h): the adapter crossed as an opaque pointer, since the class's name in this
++// image is the framework's own (extern "C" keeps the bridge symbols plain and the Swift side needs no header of ours).
++extern "C" void *dm_companion_engine(void) { return (__bridge void *)DMCompanion.shared; }
++extern "C" void dm_companion_engine_start(void *engine) { [(__bridge DMCompanion *)engine start]; }
++extern "C" NSDictionary *dm_companion_engine_snapshot(void *engine) { return [(__bridge DMCompanion *)engine snapshot]; }
++extern "C" void dm_companion_engine_action(void *engine, const char *name, long long value) { if(name)[(__bridge DMCompanion *)engine action:@(name) argument:value]; }
++extern "C" void dm_companion_engine_image(void *engine, const char *key, void (^done)(NSData *, int, int)) {
++    if(!key || !done)return;
++    [(__bridge DMCompanion *)engine image:@(key) completion:^(NSData *pixels,NSUInteger width,NSUInteger height){ done(pixels,(int)width,(int)height); }];
++}
++extern "C" void dm_companion_engine_set_visible(void *engine, bool visible) { [(__bridge DMCompanion *)engine setVisible:visible]; }
+diff --git a/dm/ios/Sources/ACNHCompanion.swift b/dm/ios/Sources/ACNHCompanion.swift
+index 1d590b29..e2f74a0b 100644
+--- a/dm/ios/Sources/ACNHCompanion.swift
++++ b/dm/ios/Sources/ACNHCompanion.swift
+@@ -44,23 +44,24 @@ struct CompanionMarker: Identifiable {
+     let load: ImageLoader
+     private var timer: Timer?
+     private var interactionSamples: AnyCancellable?
+-    // The module's ObjC adapter. This file joins the target only where the profile has companion.json (build_ipa.sh), which is also the only build
+-    // that links the adapter; a test injects reader / sender / images and gets no engine.
+-    private let native: DMCompanion?
++    // The module's adapter, reached through the C bridge in companion_apple.h. This file joins the target only where the profile has
++    // companion.json (build_ipa.sh), which is also the only build that links the adapter; a test injects reader / sender / images and
++    // gets no engine.
++    private let native: UnsafeMutableRawPointer?
+     init(reader: Reader? = nil, sender: Sender? = nil, images: ImageLoader? = nil) {
+-        let engine = reader == nil ? DMCompanion.shared() : nil
++        let engine: UnsafeMutableRawPointer? = reader == nil ? dm_companion_engine() : nil
+         native = engine
+-        read = reader ?? { engine?.snapshot as? [String: Any] ?? [:] }
+-        send = sender ?? { name, value in engine?.action(name, argument: value) }
++        read = reader ?? { engine.map { dm_companion_engine_snapshot($0) as? [String: Any] ?? [:] } ?? [:] }
++        send = sender ?? { name, value in if let engine { dm_companion_engine_action(engine, name, value) } }
+         load = images ?? { key, completion in
+             guard let engine else { completion(nil, 0, 0); return }
+-            engine.image(key) { data, w, h in completion(data, Int(w), Int(h)) }
++            dm_companion_engine_image(engine, key) { data, w, h in completion(data, Int(w), Int(h)) }
+         }
+-        if let engine {
+-            interactionSamples = NotificationCenter.default.publisher(for: Notification.Name("DmCompanionInteractionSampled"), object: engine)
++        if engine != nil {
++            interactionSamples = NotificationCenter.default.publisher(for: Notification.Name("DmCompanionInteractionSampled"))
+                 .sink { [weak self] _ in Task { @MainActor in self?.poll() } }
+         }
+-        engine?.start()
++        if let engine { dm_companion_engine_start(engine) }
+         poll()
+         schedulePolling()
+     }
+@@ -83,7 +84,7 @@ struct CompanionMarker: Identifiable {
+     func visible(_ value: Bool) {
+         if !value && page == .bag { action("bag_cancel", 0) }
+         presented=value
+-        native?.setVisible(value)
++        if let native { dm_companion_engine_set_visible(native, value) }
+         schedulePolling();if value {poll()}
+     }
+     func setPresentation(controlsHidden: Bool, physicalController: Bool, presented: Bool) {

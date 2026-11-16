@@ -70,3 +70,5 @@
 0072-ios-refuse-to-pack-an-image-the-companion-s-pins.patch
 0073-ios-build-the-companion-s-reader-as-c-20.patch
 0074-ios-the-framework-project-compiles-the-companion.patch
+0075-ios-companion-the-renderer-reaches-the-adapter-t.patch
+0076-ios-the-shell-s-game-framework-compiles-the-comp.patch

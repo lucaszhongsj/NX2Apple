@@ -24,7 +24,7 @@ def plist_keys(text):
 class TryLocal(unittest.TestCase):
     def display_version(self):
         """appVersion and the fork mark, read the way the script reads them."""
-        text = (ROOT / 'frontend/Sources/NXModel/AppUpdateStore.swift').read_text()
+        text = (ROOT / 'frontend/Sources/NXModel/AppUpdateStore.swift').read_text()   # appVersion and forkMark
         src = re.search(r'static let appVersion = "(.*)"', text).group(1)
         mark = re.search(r'static let forkMark = "(.*)"', text).group(1)
         self.assertTrue(mark.startswith('-'), 'the mark separates from the release number')

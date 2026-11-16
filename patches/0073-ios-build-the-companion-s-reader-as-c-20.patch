@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Mon, 16 Nov 2026 15:35:45 +0800
+Subject: [PATCH] ios: build the companion's reader as C++20
+
+eden_duo's ACNH headers use std::span (acnh_bytes.h, dsmod_module_sdk.h), so
+the iOS target has to compile them as C++20 rather than Xcode's default: the
+ACNH framework build stopped on `no member named 'span' in namespace 'std'`.
+The Mac build already gets a new enough standard from its own host build.
+
+Upstream-Status: pending
+Reason: eden_duo's ACNH reader needs std::span, which the iOS target does not compile with by default; the companion patches that bring it in need this setting; nxnative carries it on feat/acnh-companion
+Issue: none yet: no upstream issue for the companion
+
+---
+ dm/ios/project.yml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/dm/ios/project.yml b/dm/ios/project.yml
+index e1baf38c..b5f78181 100644
+--- a/dm/ios/project.yml
++++ b/dm/ios/project.yml
+@@ -82,6 +82,7 @@ targets:
+       TARGETED_DEVICE_FAMILY: "1,2"
+       ENABLE_BITCODE: NO
+       GCC_C_LANGUAGE_STANDARD: gnu11
++      CLANG_CXX_LANGUAGE_STANDARD: gnu++20   # the companion's reader is C++20: eden_duo's headers use std::span (dm/third_party/eden_duo/acnh/acnh_bytes.h)
+       OTHER_CFLAGS: $(inherited) -mcpu=apple-m1   # the oldest chip the app supports (an M1 iPad; iPhones from the A17 Pro, as the games need BC textures), the Mac build's default too: it has the LSE atomics the host assembly uses, which the default baseline does not accept. Not newer: dav1d turns on every feature the target promises, and the A18 target (its I8MM) stopped an M1 iPad with SIGILL in the AV1 decoder (dm/ios/tests/test_cpu_target.py)
+       CLANG_ENABLE_OBJC_ARC: YES
+       SWIFT_VERSION: "5.0"                         # Launcher.swift (SwiftUI)

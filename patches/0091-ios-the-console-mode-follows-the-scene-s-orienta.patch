@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Tue, 17 Nov 2026 01:40:20 +0800
+Subject: [PATCH] ios: the console mode follows the scene's orientation, not a
+ layout pass's bounds
+
+The game's own start-up lays the view out once with a window of the other
+shape, and taking that for a turn switched the console mode under it: the
+game reinitialised from docked and the app went down. The scene's
+interface orientation is the turn.
+
+Upstream-Status: fork-only
+Reason: the split's console mode follows the phone, and a layout pass of the game's start-up is not a turn
+Issue: none yet: no upstream issue for the companion
+
+---
+ dm/ios/Sources/front_ios.m | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index 0c9e63f1..e181ea71 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -262,7 +262,11 @@ static UIWindow *g_tv;   // the TV scene's window while one shows the picture (t
+     // The console mode follows the phone while no TV shows the picture: standing up the game's own keyboard needs the handheld mode, lying down the one the
+     // profile starts with. Only a turn takes it, so a mode the player picks in the in-game menu stays until the phone turns again.
+     if (!g_tv) {
+-        BOOL standing = b.size.height > b.size.width, first = !self.modeChosen;
++        // The scene's orientation, not this view's bounds: a layout pass during the game's own start-up reports a window of the other shape for a moment,
++        // and taking that for a turn would switch the console mode under the game.
++        UIWindowScene *scene = self.view.window.windowScene;
++        BOOL standing = scene ? UIInterfaceOrientationIsPortrait(scene.interfaceOrientation) : b.size.height > b.size.width;
++        BOOL first = !self.modeChosen;
+         if (first) { self.modeChosen = YES; self.profileMode = dm_opmode(); }
+         if (first || self.lastStanding != standing) {
+             self.lastStanding = standing;

@@ -36,7 +36,7 @@ final class ToolsAge: ObservableObject {
     func check(
         games: [LibraryGame],
         repo: String,
-        appVersion: String = AppUpdateStore.appVersion,
+        appVersion: String = AppUpdateStore.displayVersion,
         libraryFolder: String = "",
         seedRoot: String = BuildSeedCache.defaultRoot(),
         shellRoot: String = ""

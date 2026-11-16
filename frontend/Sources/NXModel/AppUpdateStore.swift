@@ -21,6 +21,12 @@ import NXCore
     /// `build-mac-app.yml`, `sync-upstream.yml`, `tools/try-local` and `RELEASING.md` read this line. Keep it in this form.
     nonisolated package static let appVersion = "1.5.0"
 
+    /// What Settings, the diagnostics and a local build show as the version: `appVersion` plus this fork's mark. The
+    /// release identity stays `appVersion` (the update check compares it with a tag and names the release's URL with it),
+    /// so a copy that carries hand-applied patches says so everywhere a person reads it.
+    nonisolated package static let forkMark = "-patched"
+    nonisolated package static let displayVersion = appVersion + forkMark
+
     /// The version this store compares releases with: `appVersion`, unless a test passes another.
     nonisolated package let version: String
 
@@ -48,7 +54,7 @@ import NXCore
     /// Whether this copy may replace itself. A launcher built from the repository never does (tests set it).
     @Published package var installability: AppUpdate.Installability
 
-    /// Download a new release by itself and install it when the app quits (Settings, on by default). Off, the Update button in
+    /// Download a new release by itself and install it when the app quits (Settings, off by default). Off, the Update button in
     /// Settings downloads, swaps in and relaunches.
     @Published package var automatic: Bool {
         didSet {
@@ -104,7 +110,7 @@ import NXCore
         self.uninstall = uninstall
         self.trashOldApp = trashOldApp
         installability = AppUpdate.installability(self.bundle, appVersion: version)
-        automatic = defaults.object(forKey: Self.automaticKey) as? Bool ?? true
+        automatic = defaults.object(forKey: Self.automaticKey) as? Bool ?? false
     }
 
     private func t(_ key: String) -> String { localizer.t(key) }

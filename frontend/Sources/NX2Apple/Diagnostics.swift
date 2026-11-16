@@ -318,7 +318,7 @@ extension LauncherStores {
             let read = { (file: String) in try? String(contentsOfFile: engine + "/" + file, encoding: .utf8) }
             let pins = read("dm/gfx/tools/dmsh_chain.lock").map(Diagnostics.chainPins) ?? (nil, nil)
             let inputs = Diagnostics.Inputs(
-                appVersion: AppUpdateStore.appVersion,
+                appVersion: AppUpdateStore.displayVersion,
                 macOS: ProcessInfo.processInfo.operatingSystemVersionString,
                 chip: Diagnostics.chip(),
                 repoPath: repo, commit: git.commit, branch: git.branch, behind: git.behind, lastFetch: git.lastFetch,

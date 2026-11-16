@@ -11,7 +11,8 @@
 #
 # What it builds: the same app as the job `build` of .github/workflows/build-mac-app.yml: the engine tree (tools/engine.py tree), the
 # launcher (frontend/tools/build_launcher.sh), the bundled tools and Python (frontend/tools/bundle_tools.sh), the iPhone shell package, Info.plist,
-# an ad-hoc signature, and frontend/tools/check_bundle.sh. The version is <appVersion>-local.
+# an ad-hoc signature, and frontend/tools/check_bundle.sh. The version is <appVersion><forkMark>-<NX2APPLE_TRY_LOCAL_SUFFIX, default local>:
+# the fork's mark says the copy carries hand-applied patches, the suffix says the build is this checkout's.
 # It is NOT a release. It writes no latest.json, signs nothing with an engine key, touches no tag, uploads nothing. An rc tag still
 # needs CI and the owner's ENGINE_SIGNING_KEY. Without a latest.json the app has no manifest to check: it opens with the engine it
 # carries (launch arguments as in tools/try-pr: the stable channel, its engine_id, no engine or app update for this run).
@@ -39,10 +40,11 @@ cache_key() {   # the bundled tools depend on the script, its pins file and the 
     cat "$ROOT/frontend/tools/bundle_tools.sh" "$ROOT/frontend/bundled-python/requirements.txt" <(uname -m) | shasum -a 256 | cut -c1-16
 }
 app_version() {
-    local src
+    local src mark
     src=$(sed -n 's/.*static let appVersion = "\(.*\)".*/\1/p' "$ROOT/frontend/Sources/NXModel/AppUpdateStore.swift")
+    mark=$(sed -n 's/.*static let forkMark = "\(.*\)".*/\1/p' "$ROOT/frontend/Sources/NXModel/AppUpdateStore.swift")
     [ -n "$src" ] || die "no appVersion in AppUpdateStore.swift"
-    echo "$src-local"
+    echo "$src${mark}-${NX2APPLE_TRY_LOCAL_SUFFIX:-local}"
 }
 
 dir="" open_app=1 own_repo=0 clean=0 print=""

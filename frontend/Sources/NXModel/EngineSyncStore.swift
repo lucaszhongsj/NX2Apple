@@ -80,7 +80,7 @@ import NXCore
                  bundle: URL? = EngineBundle.tree(in: Bundle.main.resourceURL), defaults: UserDefaults = .standard,
                  appVersion: String = AppUpdateStore.appVersion,
                  setRepoPath: @escaping (String) -> Void = { _ in }, buildRunning: @escaping () -> Bool = { false },
-                 autoUpdate: @escaping () -> Bool = { true }, log: @escaping (String) -> Void = { _ in }) {
+                 autoUpdate: @escaping () -> Bool = { false }, log: @escaping (String) -> Void = { _ in }) {
         self.localizer = localizer
         self.runner = runner
         self.repo = repo
@@ -331,9 +331,11 @@ import NXCore
         self.downloadStatus = status
     }
 
-    /// What Settings shows for the engine: its version and the pin it was built from.
+    /// What Settings shows for the engine: its version and the pin it was built from. The version carries this fork's
+    /// mark, because the tree is the pin plus the patches in `patches/series`, never a released engine.
     package var detail: String {
         guard !selection.engineID.isEmpty else { return t("engine.none") }
-        return String(format: t("engine.detail"), selection.version.isEmpty ? "?" : selection.version, String(selection.engineID.prefix(8)))
+        let version = selection.version.isEmpty ? "?" : selection.version + AppUpdateStore.forkMark
+        return String(format: t("engine.detail"), version, String(selection.engineID.prefix(8)))
     }
 }

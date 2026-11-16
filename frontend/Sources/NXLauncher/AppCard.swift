@@ -117,7 +117,7 @@ package struct AppCard: View {
 
     private var updatesGroup: some View {
         CardGroup(loc.t("settings.updates"), footnote: updates.status) {
-            CardRow("NX2Apple", detail: String(format: loc.t("app.version"), updates.version),
+            CardRow("NX2Apple", detail: String(format: loc.t("app.version"), AppUpdateStore.displayVersion),
                 dot: updates.staged != nil ? LauncherPalette.ready : nil) {
                 if updates.busy { ProgressView().controlSize(.small) }
                 if updates.staged != nil {

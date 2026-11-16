@@ -106,7 +106,7 @@ struct BatchRefreshSheet: View {
     @ObservedObject var library: GameLibrary
     @ObservedObject var toolsAge: ToolsAge
     let stores: LauncherStores
-    var appVersion: String = AppUpdateStore.appVersion
+    var appVersion: String = AppUpdateStore.displayVersion
     let onConfirmed: () -> Void
     let close: () -> Void
 

@@ -1,5 +1,6 @@
 """tools/try-local: its cache key and version string, and that its Info.plist has not drifted from the workflow's."""
 import hashlib
+import os
 import re
 import subprocess
 import sys
@@ -11,8 +12,9 @@ SCRIPT = ROOT / 'tools' / 'try-local'
 WORKFLOW = ROOT / '.github' / 'workflows' / 'build-mac-app.yml'
 
 
-def run(*args):
-    return subprocess.run([str(SCRIPT), *args], capture_output=True, text=True, check=True).stdout.strip()
+def run(*args, env=None):
+    e = {**os.environ, **env} if env else None
+    return subprocess.run([str(SCRIPT), *args], capture_output=True, text=True, check=True, env=e).stdout.strip()
 
 
 def plist_keys(text):
@@ -20,9 +22,19 @@ def plist_keys(text):
 
 
 class TryLocal(unittest.TestCase):
-    def test_version_is_app_version_plus_local(self):
-        src = re.search(r'static let appVersion = "(.*)"', (ROOT / 'frontend/Sources/NXModel/AppUpdateStore.swift').read_text()).group(1)
-        self.assertEqual(run('--print-version'), src + '-local')
+    def display_version(self):
+        """appVersion and the fork mark, read the way the script reads them."""
+        text = (ROOT / 'frontend/Sources/NXModel/AppUpdateStore.swift').read_text()
+        src = re.search(r'static let appVersion = "(.*)"', text).group(1)
+        mark = re.search(r'static let forkMark = "(.*)"', text).group(1)
+        self.assertTrue(mark.startswith('-'), 'the mark separates from the release number')
+        return src + mark
+
+    def test_version_is_the_display_version_plus_local(self):
+        self.assertEqual(run('--print-version'), self.display_version() + '-local')
+
+    def test_the_version_suffix_can_be_changed(self):
+        self.assertEqual(run('--print-version', env={'NX2APPLE_TRY_LOCAL_SUFFIX': 'modified'}), self.display_version() + '-modified')
 
     def test_cache_key_follows_the_script_and_its_pins(self):
         key = run('--print-cache-key')

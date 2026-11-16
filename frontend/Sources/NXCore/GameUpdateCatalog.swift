@@ -103,14 +103,20 @@ package enum GameUpdateCatalog {
     ) -> (hasSpecific: Bool, versionLabel: String) {
         let tid = titleID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         let baseVer = releaseBaseVersion(appVersion)
+        // What a person reads carries the fork's mark (a copy built with hand-applied patches says so); what the
+        // catalog compares with stays the release number alone, which is what its table holds.
+        let shown = appVersion.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = shown.isEmpty ? baseVer : shown
         let catalogVer = updatedVersions[tid] ?? defaultVersion
+        // A catalog entry that names this release shows the release as it runs, mark and all, not the bare number.
+        let catalogLabel = catalogVer == baseVer ? label : catalogVer
         if let gitChanged = gitSpecificChanged {
             if gitChanged {
-                return (true, catalogVer == defaultVersion ? baseVer : catalogVer)
+                return (true, catalogVer == defaultVersion ? label : catalogLabel)
             }
-            return (false, baseVer)
+            return (false, label)
         }
-        return (!baseVer.isEmpty && catalogVer == baseVer) ? (true, catalogVer) : (false, baseVer)
+        return (!baseVer.isEmpty && catalogVer == baseVer) ? (true, catalogLabel) : (false, label)
     }
 
     /// Evaluates the 4-state refresh posture and platform fast-refresh capabilities for a built game off the main thread.

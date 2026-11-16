@@ -282,7 +282,7 @@ xcrun actool AppIcon.icon --compile out --platform macosx --minimum-deployment-t
 ## App updates
 
 When the app opens it asks GitHub for the latest release. With **Install updates
-automatically** on (Settings → App, the default), a newer release is downloaded in
+automatically** on (Settings → App, off by default), a newer release is downloaded in
 the background and staged: the zip's SHA-256 must match the `digest` GitHub gives
 for the asset (a release without one is not installed automatically), and the app
 inside must carry this app's bundle identifier, an executable and the release's

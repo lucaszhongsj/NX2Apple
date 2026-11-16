@@ -92,7 +92,7 @@ extension LauncherView {
         let title = singleRefreshButtonTitle(assessment: assessment, hasMac: hasMac, hasIOS: hasIOS, isFast: isFast)
         let symbol = isFast ? "bolt.fill" : "arrow.clockwise"
         let accentColor = isFast ? LauncherPalette.ready : LauncherPalette.notice
-        let versionText = assessment?.versionLabel ?? GameUpdateCatalog.releaseBaseVersion(AppUpdateStore.appVersion)
+        let versionText = assessment?.versionLabel ?? AppUpdateStore.displayVersion
         let isProbing = toolsAge.singleRefreshProbingGameID != nil
         let isProbingThis = toolsAge.singleRefreshProbingGameID == game.id
         let perform = {

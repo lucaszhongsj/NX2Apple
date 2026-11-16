@@ -24,7 +24,7 @@ struct SupportedGamesSheet: View {
     static let coverPixels = 224
 
     init(games: [SupportedGame], owned: @escaping (String) -> LibraryGame?, covers: @escaping @autoclosure () -> SupportedCovers,
-         showInLibrary: @escaping (UUID) -> Void, appVersion: String = AppUpdateStore.appVersion) {
+         showInLibrary: @escaping (UUID) -> Void, appVersion: String = AppUpdateStore.displayVersion) {
         self.games = games
         self.owned = owned
         _covers = StateObject(wrappedValue: covers())
@@ -35,7 +35,7 @@ struct SupportedGamesSheet: View {
     /// At most 720 tall and 80 shorter than the screen.
     static func height(screen: CGFloat) -> CGFloat { LauncherSheet.maxHeight(screen: screen) }
 
-    static func isUpdatedInCurrentRelease(titleID: String, appVersion: String = AppUpdateStore.appVersion) -> Bool {
+    static func isUpdatedInCurrentRelease(titleID: String, appVersion: String = AppUpdateStore.displayVersion) -> Bool {
         GameUpdateCatalog.catalogVersion(for: titleID) == GameUpdateCatalog.releaseBaseVersion(appVersion)
     }
 

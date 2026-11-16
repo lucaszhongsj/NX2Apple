@@ -37,7 +37,7 @@ import NXCore
     @Published package var status = ""
     /// nil = not checked yet, 0 = up to date, n = n commits behind origin/main.
     @Published package var behind: Int?
-    /// Pull origin/main by itself when the app opens (Settings, on by default), so the build tools are the current ones:
+    /// Pull origin/main by itself when the app opens (Settings, off by default), so the build tools are the current ones:
     /// a checkout days behind built with tools main had already fixed (spirv-cross without its x bit, #41).
     @Published package var autoUpdate: Bool {
         didSet { defaults.set(autoUpdate, forKey: Self.autoUpdateKey) }
@@ -75,7 +75,7 @@ import NXCore
         self.log = log
         self.didMove = didMove
         self.path = path ?? RepoLayout.find(defaults: defaults, home: home)
-        autoUpdate = defaults.object(forKey: Self.autoUpdateKey) as? Bool ?? true
+        autoUpdate = defaults.object(forKey: Self.autoUpdateKey) as? Bool ?? false
     }
 
     private func t(_ key: String) -> String { localizer.t(key) }

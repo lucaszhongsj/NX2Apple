@@ -276,6 +276,6 @@ import XCTest
         store.selection = EngineSelection(channel: .stable, engineID: id("c"), version: "", previousID: "")
         XCTAssertEqual(store.detail, String(format: t("engine.detail"), "?", "cccccccc"))
         store.selection.version = "1.2.3"
-        XCTAssertEqual(store.detail, String(format: t("engine.detail"), "1.2.3", "cccccccc"))
+        XCTAssertEqual(store.detail, String(format: t("engine.detail"), "1.2.3-patched", "cccccccc"))
     }
 }

@@ -47,18 +47,18 @@ import XCTest
 
     // ---- State ----
 
-    func testThePathIsSavedAndTheSwitchIsOnByDefault() throws {
+    func testThePathIsSavedAndTheSwitchIsOffByDefault() throws {
         let dir = try makeCheckout()
         let store = makeStore(path: dir)
-        XCTAssertTrue(store.autoUpdate)
+        XCTAssertFalse(store.autoUpdate)
         XCTAssertTrue(store.isRepo)
         XCTAssertTrue(store.isGit)
         store.path = temporary.path
         XCTAssertEqual(defaults.string(forKey: RepoStore.pathKey), temporary.path)
         XCTAssertFalse(store.isRepo)
-        store.autoUpdate = false
-        XCTAssertEqual(defaults.object(forKey: RepoStore.autoUpdateKey) as? Bool, false)
-        XCTAssertFalse(makeStore().autoUpdate, "the next start reads the switch back")
+        store.autoUpdate = true
+        XCTAssertEqual(defaults.object(forKey: RepoStore.autoUpdateKey) as? Bool, true)
+        XCTAssertTrue(makeStore().autoUpdate, "the next start reads the switch back")
     }
 
     func testAZipCopyIsARepositoryWithoutGit() throws {

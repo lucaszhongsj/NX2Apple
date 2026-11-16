@@ -263,7 +263,7 @@ struct LauncherView: View {
                 if engine.usesEngineStore { engine.prepareEngine() }   // the release app: its engine store, never git
                 else { engine.syncEngine() }   // a checkout whose engine/ is missing or older than its pin (#214)
                 if repo.isRepo && repo.isGit { repo.checkForUpdates(silent: true) } else { repo.adoptAtLaunch() }
-                updates.checkForUpdate(silent: true)
+                if updates.automatic { updates.checkForUpdate(silent: true) }
                 BuildNotifier.shared.watch(m, library: library)   // BuildNotifications.swift
             }
         }

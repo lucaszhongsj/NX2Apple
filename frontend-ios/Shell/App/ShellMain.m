@@ -48,7 +48,7 @@ static const void *g_active_fbase;
 static DmFwSnap g_fw_snaps[64];
 static int g_nfw_snaps;
 static int g_boot_ok;
-static int g_companion;   // the running game carries the companion's band (dm_companion_view_controller, ACNHCompanion.swift): a phone may stand up for it
+static UIInterfaceOrientationMask g_game_mask;   // the running game's orientation, from its launch console mode (handheld portrait / docked landscape)
 
 static NSString *documents(void) { return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0]; }
 
@@ -113,7 +113,7 @@ void dm_shell_return_to_library(void) {
         g_focus = NULL;
         g_present = NULL;
         g_boot_ok = 0;
-        g_companion = 0;
+        g_game_mask = 0;
         if (fbase) restore_framework_data(fbase);
         UIWindow *window = nil;
         for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
@@ -292,6 +292,9 @@ const char *dm_shell_start_game(const char *const *keys, const char *const *valu
         setenv(keys[i], values[i], 1);
         fprintf(stderr, "boot: %s=%s\n", keys[i], values[i]);   // every one: a report then shows which of the game's settings reached the engine
     }
+    // The console mode the player chose is the orientation: handheld stands the phone up for the companion's split, docked lays it down for the wide picture.
+    const char *om = getenv("DM_OPMODE");
+    g_game_mask = (om && !strcmp(om, "0")) ? UIInterfaceOrientationMaskPortrait : UIInterfaceOrientationMaskLandscape;
     if (cwd && *cwd) chdir(cwd);
 #if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
     const char *sig_err = register_external_signature(executable);
@@ -340,11 +343,6 @@ const char *dm_shell_start_game(const char *const *keys, const char *const *valu
     g_active_fbase = info.dli_fbase;
     g_present = present;
     g_focus = focus;
-    // The companion's band is the only reason a phone may stand up in a game: the picture on top, the band under it (dm_layout, DmLayout.h).
-    // Its profile rides in the framework's resources (build_ipa.sh bundles dm/companion.json for a game with one), not in its symbol
-    // table: project-framework.yml exports only the glue the shell dlopens.
-    NSString *carrier = [[@(executable) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"dm/companion.json"];
-    g_companion = [[NSFileManager defaultManager] fileExistsAtPath:carrier];
     g_boot_ok = 1;
     return NULL;
 }
@@ -355,18 +353,19 @@ void dm_shell_present_game(void) {
         if ([s isKindOfClass:UIWindowScene.class]) for (UIWindow *w in ((UIWindowScene *)s).windows) if (w.isKeyWindow || !window) window = w;
     if (!window || !g_present) { fprintf(stderr, "[RED] shell: no window for the game view\n"); return; }
     g_present((__bridge void *)window);
-    // A game that carries the band opened portrait in shell_orientations(): have the presented controller read the mask again, so a
-    // phone already standing up turns now rather than at its next turn.
+    // The game's console mode decides its orientation; turn the window to it now, before the game renders its first frame.
     [window.rootViewController setNeedsUpdateOfSupportedInterfaceOrientations];
+    if (@available(iOS 16.0, *)) {
+        [window.windowScene requestGeometryUpdateWithPreferences:[[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:g_game_mask] errorHandler:nil];
+    }
 }
 
 @interface App : UIResponder <UIApplicationDelegate>
 @end
-// Browsing may be portrait; phone gameplay stays landscape unless the game carries the companion's band, which is used standing up.
+// Browsing is free; in a game the console mode decides: handheld stands the phone up for the companion's band, docked lays it down for the wide picture.
 static UIInterfaceOrientationMask shell_orientations(UITraitCollection *traits) {
     if (traits.userInterfaceIdiom != UIUserInterfaceIdiomPhone) return UIInterfaceOrientationMaskAll;
-    if (!g_boot_ok) return UIInterfaceOrientationMaskAllButUpsideDown;
-    return g_companion ? UIInterfaceOrientationMaskAllButUpsideDown : UIInterfaceOrientationMaskLandscape;
+    return g_game_mask ? g_game_mask : UIInterfaceOrientationMaskAllButUpsideDown;
 }
 @implementation App
 - (UIInterfaceOrientationMask)application:(UIApplication *)application supportedInterfaceOrientationsForWindow:(UIWindow *)window {

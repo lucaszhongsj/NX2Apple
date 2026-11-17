@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# 从 engine 的提交到可运行的 NX2Apple：export → headers → check → sync → try-local.
+#
+#   tools/ship-local                  build into a new folder under $TMPDIR
+#   tools/ship-local --dir DIR        build into DIR
+#   tools/ship-local --open           open it afterwards (tools/relaunch-local)
+#
+# Why the order is fixed: `engine.py tree` (inside try-local) refuses an engine with uncommitted changes or a
+# stamp that no longer matches patches/series, and `sync` moves the stamp to HEAD, so a commit that was not
+# exported before a sync can never reach patches/ again. This script commits nothing: the split of a change
+# into patches is a judgement, so it stops when engine/ is dirty and names the files.
+#
+# A new patch gets its header filled from its commit: Reason from the commit body's first line, Issue left as
+# "none yet". The script prints the patches it filled so the Issue lines can be reviewed.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DIR=""
+OPEN=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dir) DIR=${2:?usage: ship-local [--dir DIR] [--open]}; shift 2 ;;
+        --open) OPEN=1; shift ;;
+        -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "usage: ship-local [--dir DIR] [--open]" >&2; exit 1 ;;
+    esac
+done
+
+# 1. The engine must be committed: tree refuses a dirty one, and a later sync would strand the work.
+dirty=$(git -C engine status --porcelain)
+if [ -n "$dirty" ]; then
+    echo "FAIL  engine/ has uncommitted changes. Commit them first (one patch per subject), then run again:" >&2
+    echo "$dirty" | sed 's/^/      /' >&2
+    exit 1
+fi
+
+# 2. Export the commits made since the last sync, and fill the headers of the patches they became.
+base=$(python3 - <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, 'tools')
+import engine as E
+print(E.read_stamp(Path('engine')).get('head', ''))
+PY
+)
+if [ -n "$base" ] && [ -n "$(git -C engine log --format=%H "$base"..HEAD)" ]; then
+    python3 tools/engine.py export
+    python3 - "$base" <<'PY'
+import glob, re, subprocess, sys
+
+base = sys.argv[1]
+commits = subprocess.check_output(
+    ['git', '-C', 'engine', 'log', '--reverse', '--format=%H', f'{base}..HEAD'], text=True).split()
+todo = [f for f in sorted(glob.glob('patches/*.patch')) if 'Reason: TODO' in open(f).read()]
+if len(todo) != len(commits):
+    sys.exit(f'FAIL  {len(todo)} patch(es) still say TODO but {len(commits)} commit(s) were exported: '
+             'fill the headers by hand, then run again')
+for f, c in zip(todo, commits):
+    subject = subprocess.check_output(['git', '-C', 'engine', 'log', '-1', '--format=%s', c], text=True).strip()
+    body = [l.strip() for l in subprocess.check_output(
+        ['git', '-C', 'engine', 'log', '-1', '--format=%b', c], text=True).splitlines() if l.strip()]
+    s = open(f).read()
+    s = s.replace('Reason: TODO: why the fork carries this', 'Reason: ' + (body[0] if body else subject))
+    s = s.replace('Issue: TODO: LNPANDY/NX2Apple#<n>', 'Issue: none yet: no upstream issue')
+    open(f, 'w').write(s)
+    print(f'header  {f.split("/")[-1]}: {body[0] if body else subject}')
+PY
+    echo "NOTE  the new patches say \"Issue: none yet\". Give them an issue number if one exists."
+else
+    echo "ship-local: no new commit in engine/ since the last sync"
+fi
+
+# 3. The queue must apply, the engine must match it, then build.
+python3 tools/engine.py check
+python3 tools/engine.py sync
+if [ -n "$DIR" ]; then
+    tools/try-local --dir "$DIR" --no-open
+else
+    tools/try-local --no-open
+fi
+
+# 4. Say which engine the build carries, and how to open it so that engine is the one it uses.
+app_dir=${DIR:-$(ls -dt "${TMPDIR:-/tmp}"/nx2apple-try-local* 2>/dev/null | head -1)}
+if [ -n "$app_dir" ] && [ -d "$app_dir/NX2Apple.app" ]; then
+    if [ "$OPEN" = 1 ]; then
+        tools/relaunch-local --app "$app_dir/NX2Apple.app"
+    else
+        echo "ship-local: open it with  tools/relaunch-local --app $app_dir/NX2Apple.app"
+    fi
+fi

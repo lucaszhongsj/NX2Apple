@@ -10,8 +10,9 @@
 # exported before a sync can never reach patches/ again. This script commits nothing: the split of a change
 # into patches is a judgement, so it stops when engine/ is dirty and names the files.
 #
-# A new patch gets its header filled from its commit: Reason from the commit body's first line, Issue left as
-# "none yet". The script prints the patches it filled so the Issue lines can be reviewed.
+# A new patch gets its header filled from its commit: Reason from the commit body's first line that is not
+# already a header line, Issue left as "none yet". A commit that writes its own header needs no filling. The
+# script prints the patches it filled so the Issue lines can be reviewed.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -52,18 +53,22 @@ base = sys.argv[1]
 commits = subprocess.check_output(
     ['git', '-C', 'engine', 'log', '--reverse', '--format=%H', f'{base}..HEAD'], text=True).split()
 todo = [f for f in sorted(glob.glob('patches/*.patch')) if 'Reason: TODO' in open(f).read()]
-if len(todo) != len(commits):
+# A commit whose message already carries the header leaves no TODO behind: nothing to fill, nothing wrong.
+if todo and len(todo) != len(commits):
     sys.exit(f'FAIL  {len(todo)} patch(es) still say TODO but {len(commits)} commit(s) were exported: '
              'fill the headers by hand, then run again')
 for f, c in zip(todo, commits):
     subject = subprocess.check_output(['git', '-C', 'engine', 'log', '-1', '--format=%s', c], text=True).strip()
     body = [l.strip() for l in subprocess.check_output(
         ['git', '-C', 'engine', 'log', '-1', '--format=%b', c], text=True).splitlines() if l.strip()]
+    # The body may already hold the header lines: the reason is its first line that is not one of them.
+    words = [l for l in body if not re.match(r'(Upstream-Status|Reason|Issue):', l)]
+    reason = words[0] if words else subject
     s = open(f).read()
-    s = s.replace('Reason: TODO: why the fork carries this', 'Reason: ' + (body[0] if body else subject))
+    s = s.replace('Reason: TODO: why the fork carries this', 'Reason: ' + reason)
     s = s.replace('Issue: TODO: LNPANDY/NX2Apple#<n>', 'Issue: none yet: no upstream issue')
     open(f, 'w').write(s)
-    print(f'header  {f.split("/")[-1]}: {body[0] if body else subject}')
+    print(f'header  {f.split("/")[-1]}: {reason}')
 PY
     echo "NOTE  the new patches say \"Issue: none yet\". Give them an issue number if one exists."
 else

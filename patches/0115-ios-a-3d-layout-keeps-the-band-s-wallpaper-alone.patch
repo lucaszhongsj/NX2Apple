@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Wed, 18 Nov 2026 00:32:38 +0800
+Subject: [PATCH] ios: a 3D layout keeps the band's wallpaper alone
+
+Upstream-Status: pending
+Reason: the pad floats over the band, so a 3D layout draws only the wallpaper there and Tap brings the pages back
+Issue: none yet: no upstream issue for the companion
+
+---
+ dm/ios/Sources/ACNHCompanion.swift |  9 +++++++++
+ dm/ios/Sources/DmGamepad.m         |  8 ++++++++
+ dm/ios/Sources/EdenCompanion.swift |  8 +++++---
+ dm/ios/Sources/front_ios.m         | 11 +++++++++++
+ 4 files changed, 33 insertions(+), 3 deletions(-)
+
+diff --git a/dm/ios/Sources/ACNHCompanion.swift b/dm/ios/Sources/ACNHCompanion.swift
+index f6f6e344..fc8deb94 100644
+--- a/dm/ios/Sources/ACNHCompanion.swift
++++ b/dm/ios/Sources/ACNHCompanion.swift
+@@ -42,6 +42,7 @@ struct CompanionMarker: Identifiable {
+     private var pendingPage: CompanionPage?   // a pick the adapter has not confirmed yet: its page's keys are not in the snapshot until it does
+     @Published var islandName = ""
+     @Published var controlsHidden = false
++    @Published var backgroundOnly = false   // a 3D layout: the band shows its wallpaper alone, the pad floating over it
+     @Published var externalController = false
+     @Published var dockInsets = EdgeInsets()
+     @Published private(set) var presented = true
+@@ -184,6 +185,14 @@ public func dmCompanionUIState(_ hidden: Int32, _ physical: Int32, _ presented:
+     model.setPresentation(controlsHidden: hidden != 0, physicalController: physical != 0, presented: presented != 0)
+ }
+ 
++// DmGamepad.m: the 3D layout floats the pad over the band, so the band keeps only its wallpaper until Tap comes back.
++@MainActor @_cdecl("dm_companion_background_state")
++public func dmCompanionBackgroundState(_ on: Int32) {
++    guard let model = activeCompanionModel else { return }
++    let want = on != 0
++    if model.backgroundOnly != want { model.backgroundOnly = want }
++}
++
+ @MainActor @_cdecl("dm_companion_ui_dock_insets")
+ public func dmCompanionUIDockInsets(_ left: Double, _ right: Double, _ bottom: Double) {
+     guard let model = activeCompanionModel else { return }
+diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
+index 66dd3266..159b4177 100644
+--- a/dm/ios/Sources/DmGamepad.m
++++ b/dm/ios/Sources/DmGamepad.m
+@@ -305,6 +305,13 @@ static BOOL envTruthy(const char *v) {
+     if (!_padOff) _menu.alpha = 1;
+     [CATransaction commit];
+     if (!_padOff) [self wakeMenu];
++    [self updateCompanionBackground];
++}
++// The band keeps its wallpaper alone while a 3D layout floats the pad over it (front_ios.m). Weak, so a build without the
++// renderer links the pad all the same.
++extern void dm_companion_ui_background(int on) __attribute__((weak));
++- (void)updateCompanionBackground {
++    if (dm_companion_ui_background) dm_companion_ui_background(_full && !_tap && !_padOff && _layout.separated);
+ }
+ - (int)padLayout { return _tap ? 2 : _full ? 1 : 0; }
+ - (BOOL)tapOffered { return !_layout.onTV; }   // a TV has no picture on the phone for a touch to land on
+@@ -330,6 +337,7 @@ static BOOL envTruthy(const char *v) {
+     if (_layout.onTV && _tap) { _tap = NO; _full = NO; }   // Tap has no picture on the phone to map a touch onto
+     [self updateControlVisibility];
+     [self setNeedsLayout];
++    [self updateCompanionBackground];
+ }
+ - (const DmPadGeo *)geo {   // DmPadGeometry.h, computed again whenever the bounds, the safe area, the split or the layout changed
+     CGRect b = self.bounds; UIEdgeInsets i = self.safeAreaInsets;
+diff --git a/dm/ios/Sources/EdenCompanion.swift b/dm/ios/Sources/EdenCompanion.swift
+index d6e032db..79911320 100644
+--- a/dm/ios/Sources/EdenCompanion.swift
++++ b/dm/ios/Sources/EdenCompanion.swift
+@@ -217,7 +217,7 @@ struct EdenFrame {
+         if let d=value as? [String:Any]{return d.mapValues{expand($0,i)}};return value
+     }
+     static func rectangle(_ any:Any?)->CGRect {guard let a=any as? [NSNumber],a.count==4 else{return .zero};return CGRect(x:a[0].doubleValue,y:a[1].doubleValue,width:a[2].doubleValue,height:a[3].doubleValue)}
+-    @MainActor init(model:CompanionModel,manifest:EdenManifest,local:[String:Double],extraWidth:Double=0) {
++    @MainActor init(model:CompanionModel,manifest:EdenManifest,local:[String:Double],extraWidth:Double=0,backgroundOnly:Bool=false) {
+         var bindingsLocal=local;bindingsLocal["ui.page"]=Double(model.page.rawValue)
+         let b=EdenBindings(model.values,bindingsLocal.merging(["module_ready":Double(model.number("module_ready")),"acnh.font":1]){a,_ in a},manifest);bindings=b
+         var pg=b.number("ui.pg");if pg==0 && model.ready{pg=Double(model.page.rawValue)}
+@@ -303,7 +303,9 @@ struct EdenFrame {
+                 result.append(EdenNode(id:last*256+offset,data:["type":"rect","bg":color ?? "#00000000","pill":true,"apple_scrollbar":id],rect:rect,clip:r))
+             }
+         }
+-        nodes=result.sorted { $0.id < $1.id }
++        let sorted=result.sorted { $0.id < $1.id }
++        // A 3D layout floats its pad over the band: only the wallpaper stays, so the controls read against one surface.
++        nodes=backgroundOnly ? sorted.filter { $0.data["type"] as? String == "image" && $0.rect.width >= 1240 } : sorted
+     }
+     static func scrollLimit(_ spec:[String:Any], _ bindings:EdenBindings) -> Double {
+         let cols = max(1,bindings.value(spec["cols"]))
+@@ -860,7 +862,7 @@ private func edenLabelKey(_ text:String,_ scale:Double,_ color:Any?,_ weight:Str
+             #else
+             let layout=EdenSurfaceLayout(geometry.size)
+             #endif
+-            let f=EdenFrame(model:model,manifest:manifest,local:local,extraWidth:layout.extraWidth)
++            let f=EdenFrame(model:model,manifest:manifest,local:local,extraWidth:layout.extraWidth,backgroundOnly:model.backgroundOnly)
+             let (bodyNodes,footerNodes)=f.sections(renderNodes(f))
+             let hasDock=footerNodes.contains(where: { $0.isDockArtwork })
+             let navNodes=footerNodes.filter { !$0.isDockArtwork }
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index 27c45072..40d91ca4 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -101,8 +101,19 @@ static void tv_attach(void);
+ extern void *dm_companion_view_controller(void);
+ void dm_companion_ui_state(int hidden, int physical, int presented);   // ACNHCompanion.swift: band shown, controller in use, pad hidden
+ void dm_companion_ui_dock_insets(double left, double right, double bottom);   // the band's parts under the safe area
++extern void dm_companion_background_state(int on);
+ #endif
+ 
++// DmGamepad.m: a 3D layout floats the pad over the band, so the band keeps only its wallpaper until Tap comes back. Always
++// defined, so a build without the renderer still links the pad.
++void dm_companion_ui_background(int on) {
++#if DM_COMPANION
++    dm_companion_background_state(on);
++#else
++    (void)on;
++#endif
++}
++
+ @interface DmRootVC : UIViewController
+ @property (nonatomic, strong) DmGameView *game;
+ @property (nonatomic, strong) UIView *companion;   // under the pad, in the band a split gives it (DmLayout.h dm_layout): what the game's own screens cannot show there

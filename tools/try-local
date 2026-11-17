@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build the Mac app from this checkout on this Mac, without CI, and open it. Like tools/try-pr, for a change that is not pushed yet.
 #
-#   tools/try-local              build, unpack into a new folder under $TMPDIR, open
+#   tools/try-local              build, unpack into ~/Applications/NX2Apple_<version>_<YYYYMMDDHHMM>.app, open
 #
 # Options:
-#   --dir DIR    put the app into DIR (empty or new). Default: a new folder under $TMPDIR
+#   --dir DIR    put the app into DIR (empty or new). Default: ~/Applications, named for the version and the minute
 #   --no-open    build only
 #   --clean      drop the cache of the bundled tools and the icon (~/Library/Caches/NX2Apple-try-local) and exit
 #   --own-repo   let the app choose its engine as it always does, instead of the engine tree bundled in this build
@@ -47,11 +47,11 @@ app_version() {
     echo "$src${mark}-${NX2APPLE_TRY_LOCAL_SUFFIX:-local}"
 }
 
-dir="" open_app=1 own_repo=0 clean=0 print=""
+dir="" explicit_dir=0 open_app=1 own_repo=0 clean=0 print=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) usage 0 ;;
-        --dir) [ $# -ge 2 ] || usage 1; dir=$2; shift ;;
+        --dir) [ $# -ge 2 ] || usage 1; dir=$2; explicit_dir=1; shift ;;
         --no-open) open_app=0 ;;
         --own-repo) own_repo=1 ;;
         --clean) clean=1 ;;
@@ -199,7 +199,19 @@ if [ "$own_repo" = 0 ]; then
     fi
 fi
 
-note "built into $dir (delete it when you are done: rm -rf $(printf '%q' "$dir"))"
+if [ "$explicit_dir" = 0 ]; then
+    # A default build lands beside the installed apps, named for the version and the minute it was made: a copy
+    # in $TMPDIR is gone after a restart and its folder name says nothing about what it carries.
+    out="$HOME/Applications"; mkdir -p "$out"
+    name="NX2Apple_${V%-${NX2APPLE_TRY_LOCAL_SUFFIX:-local}}_$(date +%Y%m%d%H%M)"
+    dest="$out/$name.app"; n=2
+    while [ -e "$dest" ]; do dest="$out/$name-$n.app"; n=$((n+1)); done
+    mv "$app" "$dest"; app=$dest
+    rm -rf "$dir"
+    note "built into $app"
+else
+    note "built into $dir (delete it when you are done: rm -rf $(printf '%q' "$dir"))"
+fi
 if [ "$open_app" = 0 ]; then
     note "not opened (--no-open). To open it: open -n $(printf '%q' "$app") --args$(printf ' %q' "${args[@]}")"
     exit 0

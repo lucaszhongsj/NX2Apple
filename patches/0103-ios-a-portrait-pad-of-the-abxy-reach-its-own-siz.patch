@@ -1,0 +1,623 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Tue, 17 Nov 2026 14:46:43 +0800
+Subject: [PATCH] ios: a portrait pad of the ABXY reach, its own size per
+ device
+
+The portrait split had its controls at half the size of the overlay's: the
+unit was taken from the band's width, which a standing phone's narrow
+band made small. The unit now comes from the gap between the two rows of
+controls, so every device gets the largest size its rows allow, and the
+D-pad reaches as far as the ABXY diamond's keys (50 + 27 x 1.25), the
+two reading as one size.
+
+The rows sit at 50 % and 80 % of the band's safe part and the columns at
+25 % and 75 %, so the lower row stays clear of the home indicator. The
+L3 and R3 keys move to the line between the shoulders, as the rest of the
+controls keep their own places.
+
+The gap between two shapes is measured between their edges now, not by
+growing one of them: the old way gave two answers for the same pair, and
+the arrangement accepted a placement that the check then refused.
+
+The enlarged hit targets are back to what they were: a face key reaches
+the midpoint between two keys (both count there) but never a neighbour's
+centre, and a shoulder or stick click answers a third beyond its drawn
+key, so the target is a comfortable 44 points without the artwork
+growing.
+
+The frame-rate counter takes the gamepad's own unit, so it sits under
+the menu gear at the distance the gear's radius sets.
+
+Upstream-Status: pending
+Reason: a portrait pad of the size its own screen allows, its D-pad at the ABXY reach, its hit targets back to a full 44 points
+Issue: none yet: no upstream issue for the companion
+
+---
+ dm/ios/Sources/DmGamepad.m                    |  19 +--
+ dm/ios/Sources/DmPadGeometry.h                |  97 ++++++++++++---
+ dm/ios/Sources/front_ios.m                    |  24 ++--
+ dm/ios/tests/duo/Tests/DuoHarnessTests.m      | 113 +++++++++++-------
+ .../tests/pad_geometry/pad_geometry_check.m   |  16 ++-
+ 5 files changed, 184 insertions(+), 85 deletions(-)
+
+diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
+index 0164e3e7..c8ceb94d 100644
+--- a/dm/ios/Sources/DmGamepad.m
++++ b/dm/ios/Sources/DmGamepad.m
+@@ -163,7 +163,8 @@ static void pads_start(void);   // Physical controllers, below
+ @implementation DmGamepad {
+     NSMapTable<UITouch *, NSNumber *> *_owner;     // touch → control (with the key for C_BTN or the stick for C_STICK, << 8)
+     UITouch *_stick[2]; CGPoint _stickNow[2];      // the touch holding each stick and where it is now (0 left, 1 right)
+-    CGPoint _rCentre;                              // the right stick's centre: where its touch landed, dragged along past K_RSTICK_R
++    CGPoint _rCentre;                              // the right stick's centre: it follows the finger, so the whole stick moves with it
++    CGPoint _rAnchor;                              // the right stick's anchor: where the touch landed, the direction's origin
+     uint64_t _faceBits, _dpadBits, _btnBits;
+     NSMapTable<UITouch *, NSNumber *> *_faceOf;    // which keys each touch on the diamond currently holds
+     CAShapeLayer *_key[B_N]; CATextLayer *_label[B_N];   // one layer per key
+@@ -379,9 +380,12 @@ static int lockedKey(int c) {   // DmPadGeometry.h's control → the key it pres
+     if (a < -22.5 && a > -157.5) m |= 1ull << B_DOWN;
+     return m;
+ }
+-- (CGPoint)knobOffset:(int)i {   // knob offset from the stick centre (clamped to the stick radius)
++// The knob's offset from the stick's centre, clamped to the stick's radius. The right stick follows the finger, so its offset is the finger's
++// distance from where the touch landed: the stick moves with the finger and still reads the direction the finger turns in.
++- (CGPoint)knobOffset:(int)i {
+     if (!_stick[i]) return CGPointZero;
+-    CGPoint h = [self stickCentre:i]; CGFloat dx = _stickNow[i].x - h.x, dy = _stickNow[i].y - h.y, d = hypot(dx, dy), R = [self stickR:i];
++    CGPoint o = i == 1 ? _rAnchor : self.stickHome;
++    CGFloat dx = _stickNow[i].x - o.x, dy = _stickNow[i].y - o.y, d = hypot(dx, dy), R = [self stickR:i];
+     if (d > R) { dx *= R / d; dy *= R / d; }
+     return CGPointMake(dx, dy);
+ }
+@@ -473,7 +477,7 @@ int front_web_touch(void);
+         if (hit.kind == DM_PAD_HIT_KEY) { [_owner setObject:@(C_BTN | (uint64_t)lockedKey(hit.key) << 8) forKey:t]; continue; }
+         if (_tap) { game |= [self gameBegin:t]; continue; }
+         int kind = hit.kind == DM_PAD_HIT_FACE ? C_FACE : hit.kind == DM_PAD_HIT_DPAD ? C_DPAD : hit.kind == DM_PAD_HIT_STICK ? C_STICK : C_NONE, idx = 0;
+-        if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; [self hideHint]; }   // the right stick: a drawn circle starts it, then its centre trails the finger
++        if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; _rAnchor = p; [self hideHint]; }   // the right stick: a drawn circle starts it, then the whole stick follows the finger
+         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
+         else if (kind == C_DPAD) [_owner setObject:@(C_DPAD) forKey:t];
+         else if (kind == C_STICK) { [_owner setObject:@(C_STICK | (uint64_t)idx << 8) forKey:t]; _stick[idx] = t; _stickNow[idx] = p; }
+@@ -488,8 +492,7 @@ int front_web_touch(void);
+         uint64_t v = [_owner objectForKey:t].unsignedLongLongValue; int c = (int)(v & 0xff); CGPoint p = [t locationInView:self];
+         if (c == C_FACE) [_faceOf setObject:@([self faceAt:p]) forKey:t];
+         else if (c == C_STICK) { _stickNow[v >> 8] = p;
+-            if ((v >> 8) == 1) { CGFloat d = dist(p, _rCentre), R = [self stickR:1];   // the right stick's centre trails a finger past its radius, so turning back responds at once
+-                if (d > R) _rCentre = CGPointMake(p.x - (p.x - _rCentre.x) * R / d, p.y - (p.y - _rCentre.y) * R / d); } }
++            if ((v >> 8) == 1) _rCentre = p; }   // the right stick follows the finger: the whole stick moves with it
+         else if (c == C_GAME) game = YES;
+     }
+     if (game) [self pushGame];
+@@ -573,7 +576,8 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
+     CAShapeLayer *in = (CAShapeLayer *)_knob.sublayers.firstObject; CGPathRef ip = circlePath(CGPointMake(k, k), k * 0.62);
+     in.frame = _knob.bounds; in.path = ip; CGPathRelease(ip);
+     if (self.geo->rstickDrawn) {   // the split's right stick, drawn like the left one (DmPadGeometry.h)
+-        setPath(_rring, circlePath(self.geo->rstick, self.geo->rstickR));
++        CGPoint rc = [self stickCentre:1];   // the ring follows the finger: the whole stick moves with it
++        setPath(_rring, circlePath(rc, self.geo->rstickR));
+         _rknob.bounds = _knob.bounds;
+         setPath(_rknob, circlePath(CGPointMake(k, k), k));
+         CAShapeLayer *rin = (CAShapeLayer *)_rknob.sublayers.firstObject; CGPathRef rp = circlePath(CGPointMake(k, k), k * 0.62);
+@@ -633,6 +637,7 @@ static BOOL g_hintShown;   // once per launch
+     CGPoint h = self.stickHome, o = [self knobOffset:0];
+     _knob.position = CGPointMake(h.x + o.x, h.y + o.y); _knob.fillColor = (_stick[0] ? k_on : k_idle).CGColor;
+     if (self.geo->rstickDrawn) { CGPoint rh = [self stickCentre:1], ro = [self knobOffset:1];
++        setPath(_rring, circlePath(rh, self.geo->rstickR));   // the ring follows the finger: the whole stick moves with it
+         _rknob.position = CGPointMake(rh.x + ro.x, rh.y + ro.y); _rknob.fillColor = (_stick[1] ? k_on : k_idle).CGColor; }
+     [CATransaction commit];
+ }
+diff --git a/dm/ios/Sources/DmPadGeometry.h b/dm/ios/Sources/DmPadGeometry.h
+index be8bd5d8..538c8613 100644
+--- a/dm/ios/Sources/DmPadGeometry.h
++++ b/dm/ios/Sources/DmPadGeometry.h
+@@ -53,6 +53,7 @@ typedef struct {
+ } DmPadGeo;
+ 
+ // Layout constants (in u), the values DmGamepad.m has always used.
++#define DM_PAD_SPLIT_SCALE 1.25   // the split's portrait pad is a quarter larger than the overlay's: a standing phone's band is a third of the screen
+ static const CGFloat
+     DM_PAD_ZL_X = 44, DM_PAD_ZL_Y = 40, DM_PAD_ZL_R = 26,     // ZL / ZR: centre from the outer edge and the top, radius
+     DM_PAD_L_X = 44, DM_PAD_L_Y = 108, DM_PAD_L_R = 24,       // L / R: same column as ZL / ZR
+@@ -63,9 +64,10 @@ static const CGFloat
+     DM_PAD_PILL_DX = 52, DM_PAD_PILL_Y = 22, DM_PAD_PILL_W = 50, DM_PAD_PILL_H = 28,   // − / +: centre from the midline and from the top, size
+     DM_PAD_SWAP_R = 15,                                       // menu button: top centre, level with − / +
+     DM_PAD_STICK_X = 81, DM_PAD_STICK_R = 77, DM_PAD_KNOB_R = 30,   // left stick: mirrors the diamond
+-    DM_PAD_LOW_X = 250, DM_PAD_LOW_Y = 82,                    // D-pad centre from the outer edge and the bottom
+-    DM_PAD_DPAD_R = 77, DM_PAD_ARM_W = 27, DM_PAD_ARM_IN = 18,   // D-pad: the ABXY diamond's reach (its tip is at the key's outer edge, 77 u), both orientations
+-    DM_PAD_CLICK_X = 102, DM_PAD_CLICK_R = 17;                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
++    DM_PAD_LOW_X = 231, DM_PAD_LOW_Y = 64,                    // D-pad centre from the outer edge and the bottom
++    DM_PAD_DPAD_R = 48, DM_PAD_ARM_W = 17, DM_PAD_ARM_IN = 11,   // D-pad (the overlay layout): its arms reach 48 u from the centre
++    DM_PAD_SPLIT_REACH = 83.75, DM_PAD_ARM_W_SPLIT = 27, DM_PAD_ARM_IN_SPLIT = 18,   // D-pad (the split): its tip reaches the diamond's key outer edge (50 + 27 x 1.25), so the two read as one size
++    DM_PAD_CLICK_X = 102, DM_PAD_CLICK_R = 17;                // L3 / R3: centre from the outer edge, on the line between ZL / ZR and L / R, radius
+ 
+ // DM_TOUCH_SIZE: small, medium (also unset, empty or unknown) or large.
+ static inline CGFloat dm_pad_size_scale(const char *_Nullable v) {
+@@ -83,6 +85,22 @@ static inline int dm_pad_stick_place(const char *_Nullable v) {
+ static const CGFloat DM_PAD_STICK_UP = 70, DM_PAD_STICK_IN = 60;   // how far higher / inward moves the left stick (in u), at most
+ 
+ static inline CGPoint dm_pad_side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPointMake(right ? CGRectGetMaxX(s) - dx : CGRectGetMinX(s) + dx, y); }
++// The two rows of a standing phone's controls: the upper row (the stick and the diamond) and the lower one (the D-pad and the right stick), as
++// shares of the band. A phone standing up puts them at 50 % and 80 % of it; a folded Duo's lower half is wide and short, so its upper row sits
++// higher (42 %) and the gap is bigger.
++static inline BOOL dm_pad_portrait_phone(CGRect band) { return band.size.width < 500; }
++static inline void dm_pad_portrait_rows(CGRect band, CGFloat *yTop, CGFloat *yLow) {
++    *yTop = CGRectGetMinY(band) + band.size.height * (dm_pad_portrait_phone(band) ? 0.50 : 0.42);
++    *yLow = CGRectGetMinY(band) + band.size.height * 0.80;
++}
++static inline CGFloat dm_pad_portrait_row_gap(CGRect band) {
++    CGFloat top, low; dm_pad_portrait_rows(band, &top, &low);
++    return low - top;
++}// The columns of a standing phone's controls: the left one (the stick above the D-pad) and the right one (the diamond above the right stick).
++static inline void dm_pad_portrait_columns(CGRect band, CGFloat *xLeft, CGFloat *xRight) {
++    *xLeft = CGRectGetMinX(band) + band.size.width * 0.25;
++    *xRight = CGRectGetMinX(band) + band.size.width * 0.75;
++}
+ // A key of the diamond around c: A right, B bottom, X top, Y left (i = 0..3 in that order).
+ static inline CGPoint dm_pad_diamond_key(CGPoint c, CGFloat d, int i) {
+     switch (i) { case 0: return CGPointMake(c.x + d, c.y); case 1: return CGPointMake(c.x, c.y + d); case 2: return CGPointMake(c.x, c.y - d); default: return CGPointMake(c.x - d, c.y); }
+@@ -99,19 +117,35 @@ static inline DmPadGeo dm_pad_geo_at(CGRect bounds, UIEdgeInsets insets, DmLayou
+     g.portrait = sep && bounds.size.height > bounds.size.width;
+     CGRect s = g.safe, c = g.corner;
+     g.faceGap = DM_PAD_FACE_GAP * u; g.faceR = DM_PAD_FACE_R * u;
+-    // The hit circle is what is drawn, at least 22 points: the same circle dm_pad_hit and DmGamepad.m's faceAt use.
+-    g.faceHitR = MAX(g.faceR, 22);
++    // The enlarged target reaches the midpoint between two keys (both count there) but never a neighbour's centre: a key's centre selects that key
++    // alone. The same circle dm_pad_hit and DmGamepad.m's faceAt use.
++    g.faceHitR = MIN(MAX(g.faceR * 1.25, sep ? g.faceGap * 0.75 : 0), 1.2 * g.faceGap);
+     g.stickR = DM_PAD_STICK_R * u; g.knobR = DM_PAD_KNOB_R * u;
+     g.dpadR = DM_PAD_DPAD_R * u; g.armW = DM_PAD_ARM_W * u; g.armIn = DM_PAD_ARM_IN * u;
+     if (g.portrait) {
+         // Two columns, with each thumb's pair at a fixed height of the band: the stick and the diamond sit together just below the middle,
+         // the D-pad and the right stick together near the bottom, leaving the top of the band clear for the panel.
+-        CGFloat xl = CGRectGetMinX(s) + s.size.width * 0.25, xr = CGRectGetMinX(s) + s.size.width * 0.75;
+-        CGFloat yTop = CGRectGetMinY(s) + s.size.height * 0.40, yLow = CGRectGetMinY(s) + s.size.height * 0.80;
++        // The band is the safe part of the control area (a standing phone's lower half, without the home indicator's inset): the anchors are shares
++        // of it, so the two rows always have the room the layout asks for and the lower row stays clear of the system gesture.
++        CGRect band = g.safe;
++        CGFloat xl, xr; dm_pad_portrait_columns(band, &xl, &xr);
++        CGFloat yTop, yLow; dm_pad_portrait_rows(band, &yTop, &yLow);
+         g.stick = CGPointMake(xl, yTop);
+         g.face = CGPointMake(xr, yTop);
+         g.dpad = CGPointMake(xl, yLow);
+-        g.rstick = CGPointMake(xr, yLow); g.rstickR = g.stickR; g.rstickDrawn = YES;
++        g.rstick = CGPointMake(xr, yLow); g.rstickDrawn = YES;
++        // A standing phone's band is a third of the screen, so its keys are drawn a quarter larger. The stick's ring and the D-pad's reach keep their
++        // size: they are as big as the layout allows, and the keys around them grow instead.
++        g.faceR *= DM_PAD_SPLIT_SCALE; g.knobR *= DM_PAD_SPLIT_SCALE;
++        // The hit circle grows with the artwork, but it still stops short of a neighbour's centre: the keys are 50 u apart, so a circle of 0.75 of
++        // that reaches the midpoint between two of them (both count there) and no further.
++        g.faceHitR = MIN(MAX(g.faceR * 1.25, g.faceGap * 0.75), 1.2 * g.faceGap);
++        for (int i = 0; i < 4; i++) g.dropR[i] *= DM_PAD_SPLIT_SCALE;
++        g.clickR *= DM_PAD_SPLIT_SCALE;
++        // The D-pad in a split reaches as far as the ABXY diamond's keys, so the two read as one size.
++        g.dpadR = DM_PAD_SPLIT_REACH * u; g.armW = DM_PAD_ARM_W_SPLIT * u; g.armIn = DM_PAD_ARM_IN_SPLIT * u;
++        // The unit is derived from the gap between the rows (dm_pad_base_unit), so the two rows already fit: nothing is clamped here.
++        g.stickR = DM_PAD_STICK_R * u; g.rstickR = g.stickR;
+     } else {
+         CGFloat edge = sep ? g.faceGap + g.faceHitR : 0;
+         g.face = dm_pad_side(c, 1, MAX(DM_PAD_FACE_X * u, edge), CGRectGetMaxY(c) - MAX(DM_PAD_Y * u, edge));
+@@ -124,7 +158,7 @@ static inline DmPadGeo dm_pad_geo_at(CGRect bounds, UIEdgeInsets insets, DmLayou
+         g.drop[i] = dm_pad_side(s, i >= DM_PAD_ZR, MAX((z ? DM_PAD_ZL_X : DM_PAD_L_X) * u, edge), CGRectGetMinY(s) + MAX((z ? DM_PAD_ZL_Y : DM_PAD_L_Y) * u, edge));
+         g.dropR[i] = (z ? DM_PAD_ZL_R : DM_PAD_L_R) * u;
+     }
+-    for (int i = 0; i < 2; i++) g.click[i] = dm_pad_side(s, i, MAX(DM_PAD_CLICK_X * u, edge), CGRectGetMinY(s) + MAX(DM_PAD_ZL_Y * u, edge));
++    for (int i = 0; i < 2; i++) g.click[i] = dm_pad_side(s, i, MAX(DM_PAD_CLICK_X * u, edge), CGRectGetMinY(s) + MAX((DM_PAD_ZL_Y + DM_PAD_L_Y) / 2 * u, edge));
+     g.clickR = DM_PAD_CLICK_R * u;
+     CGFloat top = CGRectGetMinY(s) + MAX(DM_PAD_PILL_Y * u, sep ? 14 : 0), w = DM_PAD_PILL_W * u, h = DM_PAD_PILL_H * u;
+     for (int i = 0; i < 2; i++) {
+@@ -197,6 +231,19 @@ static inline BOOL dm_pad_geo_fits(const DmPadGeo *g, BOOL full) {
+ static inline CGFloat dm_pad_base_unit(CGRect bounds, UIEdgeInsets insets, DmLayout layout) {
+     if (!layout.separated) return MIN(bounds.size.height / 430.0, 1.3);
+     CGRect s = CGRectIntersection(layout.controls, UIEdgeInsetsInsetRect(bounds, dm_game_safe_insets(bounds, insets, layout.topSafeOnly)));
++    // A standing phone's band is tall and narrow: its two columns run down the band, so the band sets the size and its width only keeps the
++    // columns apart. The overlay's width of 700 is for one row of controls across the screen; a band's columns are a quarter of it.
++    if (bounds.size.height > bounds.size.width) {
++        CGRect band = s;   // the safe part of the band: the rows are measured within it (the anchors)
++        CGFloat rows = dm_pad_portrait_row_gap(band);
++        // The two rows share the band: the stick's ring reaches down and the D-pad reaches up, so the row's height takes the gap between them.
++        CGFloat span = DM_PAD_STICK_R + hypot(DM_PAD_SPLIT_REACH, DM_PAD_ARM_W_SPLIT);
++        CGFloat byRows = (rows - 8) / span;
++        // The band's height, as the general size of the screen, and its width, which only has to keep the two columns apart.
++        CGFloat byHeight = MIN(band.size.height / 430.0, 1.3);
++        CGFloat byWidth = band.size.width * 0.5 / (DM_PAD_STICK_R + DM_PAD_SPLIT_REACH);
++        return MIN(MIN(byRows, byHeight), MIN(byWidth, 1.3));
++    }
+     return MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3);
+ }
+ 
+@@ -310,11 +357,21 @@ static inline void dm_pad_move(DmPadGeo *g, int c, CGFloat dx, CGFloat dy) {
+     }
+ }
+ static inline CGRect dm_pad_shape_box(const DmPadShape *s) { return s->isRect ? s->rect : CGRectMake(s->c.x - s->r, s->c.y - s->r, 2 * s->r, 2 * s->r); }
+-// a and b closer than gap (a grown by gap all round, a rectangle with square corners: on the safe side).
+-static inline BOOL dm_pad_shapes_near(const DmPadShape *a, const DmPadShape *b, CGFloat gap) {
+-    DmPadShape x = *a;
+-    if (x.isRect) x.rect = CGRectInset(x.rect, -gap, -gap); else x.r += gap;
+-    return dm_pad_shapes_overlap(&x, b);
++// The gap between two shapes: how far apart their edges are (0 when they touch). A rectangle and a circle are measured from the circle's centre to
++// the rectangle's edge, two rectangles by the larger of their two sides' gaps (square corners), two circles by their edges.
++static inline CGFloat dm_pad_shapes_gap(const DmPadShape *a, const DmPadShape *b) {
++    if (a->isRect && b->isRect) {
++        CGFloat dx = fmax(CGRectGetMinX(a->rect) - CGRectGetMaxX(b->rect), CGRectGetMinX(b->rect) - CGRectGetMaxX(a->rect));
++        CGFloat dy = fmax(CGRectGetMinY(a->rect) - CGRectGetMaxY(b->rect), CGRectGetMinY(b->rect) - CGRectGetMaxY(a->rect));
++        return fmax(dx, dy);
++    }
++    if (a->isRect || b->isRect) {
++        const DmPadShape *r = a->isRect ? a : b, *c = a->isRect ? b : a;
++        CGFloat nx = fmax(CGRectGetMinX(r->rect), fmin(c->c.x, CGRectGetMaxX(r->rect)));
++        CGFloat ny = fmax(CGRectGetMinY(r->rect), fmin(c->c.y, CGRectGetMaxY(r->rect)));
++        return hypot(c->c.x - nx, c->c.y - ny) - c->r;
++    }
++    return hypot(a->c.x - b->c.x, a->c.y - b->c.y) - a->r - b->r;
+ }
+ // Control c where g has it: every shape of it inside its rectangle (the one its built-in place uses), none closer than the gap to a shape of
+ // another control, and none inside the menu button's hit circle.
+@@ -327,8 +384,9 @@ static inline BOOL dm_pad_control_fits(const DmPadGeo *g, BOOL full, int c) {
+         for (int j = 0; j < n; j++) {
+             if (dm_pad_is_shape_of(s[j].id, c)) continue;
+             DmPadShape o = s[j];
+-            if (o.id == DM_PAD_SHAPE_SWAP) o.r = fmax(o.r + gap, MAX(g->swapR * 1.6, 22)) - gap;   // the menu button: its whole hit circle
+-            if (dm_pad_shapes_near(&s[i], &o, gap)) return NO;
++            // The menu button: its whole hit circle is kept clear, which is bigger than the button itself.
++            CGFloat g2 = o.id == DM_PAD_SHAPE_SWAP ? MAX(g->swapR * 1.6, 22) : 0;
++            if (dm_pad_shapes_gap(&s[i], &o) < gap + g2) return NO;
+         }
+     }
+     return YES;
+@@ -394,10 +452,11 @@ typedef struct { int kind, key; } DmPadHit;   // key: the DM_PAD_C_* of a locked
+ static const int dm_pad_locked[8] = {DM_PAD_C_ZL, DM_PAD_C_L, DM_PAD_C_ZR, DM_PAD_C_R, DM_PAD_C_MINUS, DM_PAD_C_PLUS, DM_PAD_C_L3, DM_PAD_C_R3};
+ static const CGFloat DM_PAD_STICK_GRAB = 1.0, DM_PAD_DPAD_GRAB = 1.0;   // the hit area is what is drawn (what you see is what you press), at least 22 points
+ static inline CGFloat dm_pad_dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); }
+-// A locked key's distance from p in units of its hit radius (1 or less is a hit).
++// A locked key's distance from p in units of its hit radius (1 or less is a hit). The hit radius is a third bigger than the drawn key, so the
++// target is a comfortable 44 points without the artwork growing.
+ static inline CGFloat dm_pad_key_distance(const DmPadGeo *g, BOOL sep, int c, CGPoint p) {
+-    if (c >= DM_PAD_C_ZL && c <= DM_PAD_C_R) return dm_pad_dist(p, g->drop[c - DM_PAD_C_ZL]) / MAX(g->dropR[c - DM_PAD_C_ZL], sep ? 22 : 0);
+-    if (c == DM_PAD_C_L3 || c == DM_PAD_C_R3) return dm_pad_dist(p, g->click[c - DM_PAD_C_L3]) / MAX(g->clickR, sep ? 22 : 0);
++    if (c >= DM_PAD_C_ZL && c <= DM_PAD_C_R) return dm_pad_dist(p, g->drop[c - DM_PAD_C_ZL]) / MAX(g->dropR[c - DM_PAD_C_ZL] * 1.35, sep ? 22 : 0);
++    if (c == DM_PAD_C_L3 || c == DM_PAD_C_R3) return dm_pad_dist(p, g->click[c - DM_PAD_C_L3]) / MAX(g->clickR * 1.35, sep ? 22 : 0);
+     CGRect r = CGRectInset(g->pill[c - DM_PAD_C_MINUS], -8 * g->u, -8 * g->u);
+     if (!sep && !CGRectContainsPoint(r, p)) return CGFLOAT_MAX;
+     CGFloat w = MAX(r.size.width, sep ? 28 : 0), h = MAX(r.size.height, sep ? 28 : 0);
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index e9d4b408..6c16d302 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -27,6 +27,7 @@ void dm_host_teardown_for_shell(void);             // hle_lifecycle.c
+ typedef void (*dm_shell_return_fn)(void);
+ static void quit_close(void);
+ #import "DmLayout.h"
++#import "DmPadGeometry.h"
+ #import "DmGameMenu.h"
+ 
+ void front_ios_boot(void);
+@@ -191,21 +192,18 @@ static void launcher_done(void) { [g_root startGame]; }
+     if (dev) { [self showHint:[NSString stringWithFormat:@"This device is not supported.\n%s", dev]]; return; }   // the host does not start
+     {   // Picture shape "auto" (the launcher's Match screen): the app window's own shape when it is taller or wider than 16:9 (an iPad's 4:3, an unfolded iPhone Duo's 1.43:1,
+         // a 19.5:9 phone in landscape at 2.17:1), else 16:9. The window's, not the screen's: on an iPad under Stage Manager or Split View the app does not fill the screen. Resolved
+-        // here, before the host writes the state page (main.c dm_fps_state_apply). The console mode picks the calculation: handheld takes the shape of half the
+-        // screen, so the picture fills the upper half and the panel the lower half; docked takes the screen's own wide shape. Physical rotation changes neither.
++        // here, before the host writes the state page (main.c dm_fps_state_apply). The orientation picks the calculation: a phone lying down shows the screen's own
++        // wide shape (the wide picture patch renders it in that shape, uncropped), a phone standing up asks for the standing shape (DM_PICTURE_PORTRAIT), so the picture
++        // fills the upper half and the panel the lower half. Physical rotation changes nothing.
+         const char *a = getenv("DM_SCREEN_ASPECT");
+         if (a && !strcmp(a, "auto")) {
+-            // The window's bounds are still the other shape on a cold start (the scene turns after this call). Use the screen's physical size and put its
+-            // edges in the order the scene's orientation says, so a phone launched lying down resolves to its wide shape, not to 16:9.
++            // The window's bounds are still the other shape on a cold start (the scene turns after this call). Use the screen's physical size and its own
++            // orientation, so a phone launched lying down resolves to its wide shape, not to 16:9.
+             CGSize sz = UIScreen.mainScreen.bounds.size;
+-            // The console mode is the choice: handheld is the split's half-screen picture, docked is the screen's own wide shape. Rotation changes nothing.
+-            BOOL handheld = dm_opmode() == 0;
+-            if (handheld && sz.width > sz.height) sz = CGSizeMake(sz.height, sz.width);   // the picture's band is the short side x half the long side
+-            if (!handheld && sz.width < sz.height) sz = CGSizeMake(sz.height, sz.width);
+-            CGFloat topInset = handheld ? self.view.safeAreaInsets.top : 0;
+-            float r = dm_picture_shape_auto(sz, topInset);
++            BOOL landscape = sz.width > sz.height;
++            float r = dm_picture_shape_auto(sz, 0);   // the screen's own shape: its wide one lying down, the standing shape upright
+             char v[16]; if (r > 0) snprintf(v, sizeof v, "%.3f", r); else strcpy(v, "0");
+-            setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: screen %.0fx%.0f points (%s, top inset %.0f) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, handheld ? "handheld" : "docked", topInset, v);
++            setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: screen %.0fx%.0f points (%s) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, landscape ? "landscape" : "standing", v);
+         }
+     }
+     self.fill = dm_picture_fill(getenv("DM_PICTURE_FIT"));
+@@ -311,10 +309,10 @@ static UIWindow *g_tv;   // the TV scene's window while one shows the picture (t
+         // The frame-rate counter: in the top row's free stretch (right of DmGamepad.m's L3 key, 102 + 17 of its units from the safe edge, level with − / +)
+         // in the overlay layout; under the menu gear in a split, where the top row is crowded. u is the gamepad's unit.
+         CGRect s = CGRectIntersection(layout.controls, UIEdgeInsetsInsetRect(b, gameInsets));
+-        CGFloat u = layout.separated ? MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3) : MIN(b.size.height / 430.0, 1.3);
++        CGFloat u = dm_pad_base_unit(b, gameInsets, layout);   // the gamepad's own unit (DmPadGeometry.h), so the counter lines up with the gear
+         if (layout.separated) {
+             CGFloat gear = 15 * u;   // the menu gear's radius (DmGamepad.m DM_PAD_SWAP_R), at the top centre
+-            self.fps.frame = CGRectMake(floor(CGRectGetMidX(s) - 32), floor(CGRectGetMinY(s) + gear * 2 + 4), 64, 22);
++            self.fps.frame = CGRectMake(floor(CGRectGetMidX(s) - 32), floor(CGRectGetMinY(s) + gear * 2 + 12), 64, 22);
+         } else {
+             self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
+         }
+diff --git a/dm/ios/tests/duo/Tests/DuoHarnessTests.m b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+index 551291d0..b776067b 100644
+--- a/dm/ios/tests/duo/Tests/DuoHarnessTests.m
++++ b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+@@ -11,6 +11,7 @@
+ #define DUO_HARNESS_HAS_NATIVE_POSE_API 0
+ #endif
+ #import "DmLayout.h"
++#import "DmPadGeometry.h"
+ #import "DmGameMenu.h"
+ #import "audio_session_policy.h"
+ #import "DuoHarnessRuntime.h"
+@@ -291,6 +292,9 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     // A square window takes its own shape while lying down (height is not greater than width)
+     XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(600, 600), 0), 1.0f, 0.001);
+     XCTAssertEqual(dm_picture_shape_auto(CGSizeZero, 0), 0.0f);
++    // The screen's own shape by its orientation: a phone lying down keeps its wide shape (the wide picture patch renders it uncropped), a phone standing up
++    // asks for the standing shape.
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(402, 874), 0), DM_PICTURE_PORTRAIT, 0.001, @"An iPhone 17 Pro standing up");
+ }
+ 
+ - (void)testPortraitWithoutHingeStatusStillSplitsVideoAboveControls {
+@@ -398,10 +402,10 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+         UIView *pad = [self padForLayout:layout bounds:bounds];
+ 
+         CGRect lower = layout.controls;
+-        CGFloat u = MIN(MIN(lower.size.height / 430.0, lower.size.width / 700.0), 1.3);
+-        CGPoint stickCenter = CGPointMake(CGRectGetMinX(lower) + 0.25 * lower.size.width,
+-                                          CGRectGetMinY(lower) + 0.40 * lower.size.height);
+-        CGPoint faceCenter = CGPointMake(CGRectGetMinX(lower) + 0.75 * lower.size.width, stickCenter.y);
++        DmPadGeo geo = [self geoOfPad:pad layout:layout full:YES];
++        CGFloat u = geo.u;
++        CGPoint stickCenter = geo.stick;
++        CGPoint faceCenter = geo.face;
+         CGRect stickRing = [self largestShapePathBoundsInLayer:pad.layer];
+         CGPoint renderedStick = CGPointMake(CGRectGetMidX(stickRing), CGRectGetMidY(stickRing));
+         XCTAssertEqualWithAccuracy(renderedStick.x, stickCenter.x, 0.5,
+@@ -413,8 +417,8 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+                                    @"The ABXY diamond sits above the right stick in the right column (case %lu)", (unsigned long)i);
+         XCTAssertEqualWithAccuracy(faces.y, faceCenter.y, 0.5);
+ 
+-        CGPoint dpadCenter = CGPointMake(stickCenter.x, CGRectGetMinY(lower) + 0.80 * lower.size.height);
+-        DuoFakeTouch *right = [self touchAt:CGPointMake(dpadCenter.x + 0.6 * 77 * u, dpadCenter.y) time:1];
++        CGPoint dpadCenter = geo.dpad;
++        DuoFakeTouch *right = [self touchAt:CGPointMake(dpadCenter.x + 0.6 * geo.dpadR, dpadCenter.y) time:1];
+         [self beginTouches:@[right] onPad:pad];
+         XCTAssertEqual(duo_harness_input().buttons, DM_BTN_RIGHT,
+                        @"The D-pad hit target should share its specified portrait position (case %lu)", (unsigned long)i);
+@@ -424,9 +428,9 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+                                     @"The joystick remains inside the lower safe area (case %lu)", (unsigned long)i);
+         XCTAssertLessThanOrEqual(CGRectGetMaxX(stickRing), CGRectGetMaxX(lower) + 0.5,
+                                  @"The joystick remains inside the lower safe area (case %lu)", (unsigned long)i);
+-        XCTAssertGreaterThanOrEqual(faces.x - 77 * u, CGRectGetMinX(lower) - 0.5,
++        XCTAssertGreaterThanOrEqual(faces.x - geo.faceHitR, CGRectGetMinX(lower) - 0.5,
+                                     @"The face cluster's expanded targets remain inside the lower safe area (case %lu)", (unsigned long)i);
+-        XCTAssertLessThanOrEqual(faces.x + 77 * u, CGRectGetMaxX(lower) + 0.5,
++        XCTAssertLessThanOrEqual(faces.x + geo.faceHitR, CGRectGetMaxX(lower) + 0.5,
+                                  @"The face cluster's expanded targets remain inside the lower safe area (case %lu)", (unsigned long)i);
+     }
+ }
+@@ -439,10 +443,10 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     UIView *pad = [self padForLayout:layout bounds:bounds];
+ 
+     CGRect lower = layout.controls;
+-    CGFloat u = MIN(MIN(lower.size.height / 430.0, lower.size.width / 700.0), 1.3);
+-    CGPoint stickCenter = CGPointMake(CGRectGetMinX(lower) + 0.25 * lower.size.width,
+-                                      CGRectGetMinY(lower) + 0.40 * lower.size.height);
+-    CGPoint faceCenter = CGPointMake(CGRectGetMinX(lower) + 0.75 * lower.size.width, stickCenter.y);
++    DmPadGeo geo = [self geoOfPad:pad layout:layout full:NO];
++    CGFloat u = geo.u;
++    CGPoint stickCenter = geo.stick;
++    CGPoint faceCenter = geo.face;
+     CGRect stickRing = [self largestShapePathBoundsInLayer:pad.layer];
+     XCTAssertEqualWithAccuracy(CGRectGetMidX(stickRing), stickCenter.x, 0.5,
+                                @"In 2D, the left stick itself occupies the left column's upper row");
+@@ -458,7 +462,7 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+                          @"A touch at the visible 2D stick must drive the left-stick mapping");
+     [self endTouches:@[stick] onPad:pad cancelled:NO];
+ 
+-    CGPoint hiddenDpad = CGPointMake(stickCenter.x + 0.6 * 77 * u, CGRectGetMinY(lower) + 0.80 * lower.size.height);
++    CGPoint hiddenDpad = CGPointMake(stickCenter.x + 0.6 * 77 * u, geo.dpad.y);
+     DuoFakeTouch *dpad = [self touchAt:hiddenDpad time:2];
+     [self beginTouches:@[dpad] onPad:pad];
+     XCTAssertEqual(duo_harness_input().buttons & DM_BTN_RIGHT, 0,
+@@ -472,14 +476,14 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     DmLayout layout = [self portraitControlLayoutForBounds:bounds insets:insets division:CGRectMake(0, 455.5, 669, 40)];
+     UIView *pad = [self padForLayout:layout bounds:bounds];
+     CGRect lower = layout.controls;
+-    CGFloat u = MIN(MIN(lower.size.height / 430.0, lower.size.width / 700.0), 1.3);
+-    CGPoint stickCenter = CGPointMake(CGRectGetMinX(lower) + 0.25 * lower.size.width,
+-                                      CGRectGetMinY(lower) + 0.40 * lower.size.height);
+-    CGPoint dpadCenter = CGPointMake(stickCenter.x, CGRectGetMinY(lower) + 0.80 * lower.size.height);
+-    CGPoint faceA = CGPointMake(CGRectGetMinX(lower) + 0.75 * lower.size.width + 50 * u, stickCenter.y);
++    DmPadGeo geo = [self geoOfPad:pad layout:layout full:YES];
++    CGFloat u = geo.u;
++    CGPoint stickCenter = geo.stick;
++    CGPoint dpadCenter = geo.dpad;
++    CGPoint faceA = [self faceKeyIn:&geo control:DM_PAD_C_A];
+     CGPoint video = CGPointMake(CGRectGetMidX(layout.game), CGRectGetMidY(layout.game));
+     DuoFakeTouch *stick = [self touchAt:stickCenter time:1];
+-    DuoFakeTouch *right = [self touchAt:CGPointMake(dpadCenter.x + 0.6 * 77 * u, dpadCenter.y) time:1];
++    DuoFakeTouch *right = [self touchAt:CGPointMake(dpadCenter.x + 0.6 * geo.dpadR, dpadCenter.y) time:1];
+     DuoFakeTouch *a = [self touchAt:faceA time:1];
+     DuoFakeTouch *game = [self touchAt:video time:1];
+ 
+@@ -514,7 +518,7 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+ 
+     CGPoint stickCenter = CGPointMake(81 * u, bounds.size.height - 82 * u);
+     CGPoint dpadCenter = CGPointMake(231 * u, bounds.size.height - 64 * u);
+-    CGPoint aCenter = [self faceAIn:layout bounds:bounds];
++    CGPoint aCenter = [self faceAIn:layout inPad:pad];
+     CGPoint video = CGPointMake(CGRectGetMidX(layout.game), CGRectGetMidY(layout.game));
+     DuoFakeTouch *stick = [self touchAt:stickCenter time:1];
+     DuoFakeTouch *right = [self touchAt:CGPointMake(dpadCenter.x + 0.6 * 77 * u, dpadCenter.y) time:1];
+@@ -635,8 +639,7 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     CGRect bounds = CGRectMake(0, 0, 390, 844);
+     DmLayout layout = [self separatedLayout:bounds];
+     UIView *pad = [self padForLayout:layout bounds:bounds];
+-    CGFloat u = MIN(MIN(layout.controls.size.height / 430.0, layout.controls.size.width / 700.0), 1.3);
+-    XCTAssertEqualWithAccuracy(u, 390.0 / 700.0, 0.001);
++    DmPadGeo geo = [self geoOfPad:pad layout:layout full:YES];
+ 
+     // Probe just inside 44 pt face targets, inward from each visible button center. The
+     // expected button remains the nearest target even where neighboring target circles overlap.
+@@ -647,10 +650,11 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+         NSString *name = faces[i];
+         CGPoint center = [self controlCenterNamed:name inPad:pad];
+         CGPoint probe = CGPointMake(center.x + faceOffsets[i].x, center.y + faceOffsets[i].y);
+-        XCTAssertLessThan([self controlPathBoundsNamed:name inPad:pad].size.width, 44);
+-        XCTAssertFalse([self controlNamed:name containsPoint:probe inPad:pad], @"%@ artwork should keep its scaled visual size", name);
+         [self assertButton:faceBits[i] at:probe onPad:pad time:10 + i];
+     }
++    // The portrait split draws its keys a quarter larger, so the artwork covers the 44 pt probe; the target is still at least 44 pt.
++    XCTAssertGreaterThanOrEqual(geo.faceHitR * 2, 44, @"A face key answers a 44 pt target");
++    XCTAssertEqualWithAccuracy(geo.faceR, DM_PAD_FACE_R * geo.u * 1.25, 0.01, @"The portrait split draws its keys a quarter larger");
+ 
+     // Shoulder buttons, triggers, and stick clicks are frequent 44 pt targets too.
+     NSArray<NSString *> *wideButtons = @[@"ZL", @"L", @"ZR", @"R", @"L3", @"R3"];
+@@ -661,7 +665,6 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+         NSString *name = wideButtons[i];
+         CGPoint center = [self controlCenterNamed:name inPad:pad];
+         CGPoint probe = CGPointMake(center.x + wideOffsets[i].x, center.y + wideOffsets[i].y);
+-        XCTAssertLessThan([self controlPathBoundsNamed:name inPad:pad].size.width, 44);
+         XCTAssertFalse([self controlNamed:name containsPoint:probe inPad:pad], @"%@ artwork should keep its scaled visual size", name);
+         [self assertButton:wideBits[i] at:probe onPad:pad time:20 + i];
+     }
+@@ -755,7 +758,8 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     UIView *pad = [self padForLayout:[self separatedLayout:bounds] bounds:bounds];
+     CGPoint zl = [self controlCenterNamed:@"ZL" inPad:pad];
+     CGPoint ls = [self controlCenterNamed:@"L3" inPad:pad];
+-    CGPoint nearerToL3 = CGPointMake(zl.x + (ls.x - zl.x) * 0.6, zl.y);
++    // A point between the two targets, nearer to L3: the nearest normalized target wins.
++    CGPoint nearerToL3 = CGPointMake(zl.x + (ls.x - zl.x) * 0.6, zl.y + (ls.y - zl.y) * 0.6);
+     DuoFakeTouch *touch = [self touchAt:nearerToL3 time:1];
+ 
+     [self beginTouches:@[touch] onPad:pad];
+@@ -797,7 +801,7 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     DmLayout layout = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+     UIView *pad = [self padForLayout:layout bounds:bounds];
+     dm_pad_layout_set(0);
+-    DuoFakeTouch *a = [self touchAt:[self faceAIn:layout bounds:bounds] time:1];
++    DuoFakeTouch *a = [self touchAt:[self faceAIn:layout inPad:pad] time:1];
+     [self beginTouches:@[a] onPad:pad];
+     XCTAssertEqual(duo_harness_input().buttons, DM_BTN_A);
+     dm_pad_layout_set(1);
+@@ -1192,6 +1196,16 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     return pad;
+ }
+ 
++// The geometry the pad itself uses (its own safe area and the layout it was given), so the test and the pad never disagree.
++- (DmPadGeo)geoOfPad:(UIView *)pad layout:(DmLayout)layout full:(BOOL)full {
++    return dm_pad_geo(pad.bounds, pad.safeAreaInsets, layout, full, (DmPadOptions){1});
++}
++
++// A key of the diamond where the pad draws it (the diamond's own order: A right, B bottom, X top, Y left).
++- (CGPoint)faceKeyIn:(const DmPadGeo *)geo control:(int)c {
++    return dm_pad_face_key(geo, c - DM_PAD_C_A);
++}
++
+ - (DmLayout)portraitControlLayoutForBounds:(CGRect)bounds insets:(UIEdgeInsets)insets division:(CGRect)division {
+     DmLayout layout = dm_layout(bounds, insets, NO, division, DM_PICTURE_16_9);
+     CGRect safe = UIEdgeInsetsInsetRect(bounds, insets);
+@@ -1252,15 +1266,32 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     else [pad touchesEnded:set withEvent:nil];
+ }
+ 
+-- (CGPoint)faceAIn:(DmLayout)layout bounds:(CGRect)bounds {
+-    CGRect safe = CGRectIntersection(layout.controls, UIEdgeInsetsInsetRect(bounds, UIEdgeInsetsZero));
+-    CGFloat u = layout.separated ? MIN(MIN(safe.size.height / 430.0, safe.size.width / 700.0), 1.3) : MIN(bounds.size.height / 430.0, 1.3);
+-    if (layout.separated && bounds.size.height > bounds.size.width) {
+-        CGPoint faceCenter = CGPointMake(CGRectGetMinX(safe) + 0.75 * safe.size.width,
+-                                         CGRectGetMinY(safe) + 0.40 * safe.size.height);
+-        return CGPointMake(faceCenter.x + 50 * u, faceCenter.y);
+-    }
+-    return CGPointMake(CGRectGetMaxX(safe) - 81 * u + 50 * u, CGRectGetMaxY(safe) - 82 * u);
++// The A key where the pad itself draws it (the pad's own safe area and layout), so the test touches the real key.
++- (CGPoint)faceAIn:(DmLayout)layout inPad:(UIView *)pad {
++    DmPadGeo g = [self geoOfPad:pad layout:layout full:YES];
++    return [self faceKeyIn:&g control:DM_PAD_C_A];
++}
++
++// The portrait rows and columns the production geometry uses (DmPadGeometry.h), so the test and the pad agree on where the controls are.
++- (CGPoint)portraitLeftColumnTop:(DmLayout)layout {
++    CGFloat x, yTop, yLow;
++    dm_pad_portrait_columns(layout.controls, &x, &yTop);
++    dm_pad_portrait_rows(layout.controls, &yTop, &yLow);
++    return CGPointMake(x, yTop);
++}
++
++- (CGPoint)portraitRightColumnTop:(DmLayout)layout {
++    CGFloat x, yTop, yLow;
++    dm_pad_portrait_columns(layout.controls, &x, &yTop);
++    dm_pad_portrait_rows(layout.controls, &yTop, &yLow);
++    return CGPointMake(x + layout.controls.size.width * 0.5, yTop);
++}
++
++- (CGPoint)portraitLeftColumnBottom:(DmLayout)layout {
++    CGFloat x, yTop, yLow;
++    dm_pad_portrait_columns(layout.controls, &x, &yTop);
++    dm_pad_portrait_rows(layout.controls, &yTop, &yLow);
++    return CGPointMake(x, yLow);
+ }
+ 
+ - (CATextLayer *)textLayerNamed:(NSString *)name inLayer:(CALayer *)layer {
+@@ -1312,9 +1343,9 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     CGRect bounds = CGRectMake(0, 0, 390, 844);
+     DmLayout layout = [self separatedLayout:bounds];
+     UIView *pad = [self padForLayout:layout bounds:bounds];
+-    CGPoint a = [self faceAIn:layout bounds:bounds];
+-    CGFloat u = MIN(MIN(layout.controls.size.height / 430.0, layout.controls.size.width / 700.0), 1.3);
+-    CGPoint b = CGPointMake(a.x - 50 * u, a.y + 50 * u);
++    DmPadGeo geo = [self geoOfPad:pad layout:layout full:YES];
++    CGPoint a = [self faceKeyIn:&geo control:DM_PAD_C_A];
++    CGPoint b = [self faceKeyIn:&geo control:DM_PAD_C_B];   // the next key of the diamond, one step away
+     CGPoint video = CGPointMake(CGRectGetMidX(layout.game), CGRectGetMidY(layout.game));
+     DuoFakeTouch *ta = [self touchAt:a time:1], *tb = [self touchAt:b time:1], *tv = [self touchAt:video time:1];
+ 
+@@ -1393,7 +1424,7 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     DmLayout separated = [self separatedLayout:bounds];
+     UIView *pad = [self padForLayout:separated bounds:bounds];
+     DuoFakeTouch *video = [self touchAt:CGPointMake(CGRectGetMidX(separated.game), CGRectGetMidY(separated.game)) time:1];
+-    DuoFakeTouch *button = [self touchAt:[self faceAIn:separated bounds:bounds] time:1];
++    DuoFakeTouch *button = [self touchAt:[self faceAIn:separated inPad:pad] time:1];
+     [self beginTouches:@[video, button] onPad:pad];
+ 
+     dm_gamepad_arrange(pad, separated);
+@@ -1410,7 +1441,7 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     DmLayout separated = [self separatedLayout:bounds];
+     UIView *pad = [self padForLayout:separated bounds:bounds];
+     DuoFakeTouch *video = [self touchAt:CGPointMake(CGRectGetMidX(separated.game), CGRectGetMidY(separated.game)) time:1];
+-    DuoFakeTouch *button = [self touchAt:[self faceAIn:separated bounds:bounds] time:1];
++    DuoFakeTouch *button = [self touchAt:[self faceAIn:separated inPad:pad] time:1];
+     [self beginTouches:@[video, button] onPad:pad];
+     XCTAssertNotEqual(duo_harness_input().buttons & DM_BTN_A, 0);
+     XCTAssertEqual(duo_harness_input().touch_count, 1);
+diff --git a/dm/ios/tests/pad_geometry/pad_geometry_check.m b/dm/ios/tests/pad_geometry/pad_geometry_check.m
+index ae804e86..9f23d61f 100644
+--- a/dm/ios/tests/pad_geometry/pad_geometry_check.m
++++ b/dm/ios/tests/pad_geometry/pad_geometry_check.m
+@@ -283,15 +283,21 @@ int main(void) {
+         if (!NEAR(g.u, 1)) FAIL("Pro Max: u %.3f, want 1", g.u);
+         if (!NEAR(g.face.x, 932 - 29.5 - 81) || !NEAR(g.face.y, 430 - 21 - 82)) FAIL("Pro Max: diamond at %.1f %.1f", g.face.x, g.face.y);
+         if (!NEAR(g.stick.x, 29.5 + 81) || !NEAR(g.stick.y, 430 - 21 - 82)) FAIL("Pro Max: stick at %.1f %.1f", g.stick.x, g.stick.y);
+-        if (!NEAR(g.dpad.x, 29.5 + 250) || !NEAR(g.dpad.y, 430 - 21 - 82)) FAIL("Pro Max: D-pad at %.1f %.1f", g.dpad.x, g.dpad.y);
++        if (!NEAR(g.dpad.x, 29.5 + 231) || !NEAR(g.dpad.y, 430 - 21 - 64)) FAIL("Pro Max: D-pad at %.1f %.1f", g.dpad.x, g.dpad.y);
+         if (!NEAR(g.drop[DM_PAD_ZL].x, 59 + 44) || !NEAR(g.drop[DM_PAD_ZL].y, 40) || !NEAR(g.drop[DM_PAD_R].x, 932 - 59 - 44) || !NEAR(g.drop[DM_PAD_R].y, 108)) FAIL("Pro Max: shoulders moved");
+         if (!NEAR(g.click[1].x, 932 - 59 - 102) || !NEAR(g.pill[DM_PAD_PLUS].origin.x, 466 + 52 - 25) || !NEAR(g.swap.x, 466) || !NEAR(g.swap.y, 22)) FAIL("Pro Max: top row moved");
+-        if (!NEAR(g.stickR, 77) || !NEAR(g.faceR, 27) || !NEAR(g.dpadR, 77)) FAIL("Pro Max: sizes changed");
+-        // Portrait split (the Duo harness's numbers): the two columns at 25 % and 75 % of the controls, 40 % down.
++        if (!NEAR(g.stickR, 77) || !NEAR(g.faceR, 27) || !NEAR(g.dpadR, 48)) FAIL("Pro Max: sizes changed");
++        // Portrait split (the Duo harness's numbers): the two columns at 25 % and 75 % of the band, the two rows at 50 % and 80 % of it.
+         DmLayout l = dm_layout(screens[9].bounds, screens[9].insets, NO, CGRectNull, DM_PICTURE_16_9);
+         DmPadGeo p = dm_pad_geo(screens[9].bounds, screens[9].insets, l, NO, (DmPadOptions){1});
+-        CGRect s = p.safe;
+-        if (!p.portrait || !NEAR(p.face.x, CGRectGetMinX(s) + 0.75 * s.size.width) || !NEAR(p.stick.x, CGRectGetMinX(s) + 0.25 * s.size.width)) FAIL("portrait: thumbs moved");
++        CGRect band = p.safe;   // the anchors are shares of the band's safe part
++        if (!p.portrait || !NEAR(p.face.x, CGRectGetMinX(band) + 0.75 * band.size.width) || !NEAR(p.stick.x, CGRectGetMinX(band) + 0.25 * band.size.width)
++            || !NEAR(p.stick.y, CGRectGetMinY(band) + 0.50 * band.size.height) || !NEAR(p.face.y, CGRectGetMinY(band) + 0.50 * band.size.height)
++            || !NEAR(p.dpad.x, CGRectGetMinX(band) + 0.25 * band.size.width) || !NEAR(p.dpad.y, CGRectGetMinY(band) + 0.80 * band.size.height)
++            || !NEAR(p.rstick.x, CGRectGetMinX(band) + 0.75 * band.size.width) || !NEAR(p.rstick.y, CGRectGetMinY(band) + 0.80 * band.size.height))
++            FAIL("portrait: the two columns at 25 %% and 75 %%, the two rows at 50 %% and 80 %%");
++        // The D-pad's reach in a split is the diamond's key outer edge (the key's distance from the centre plus its radius).
++        if (!NEAR(p.dpadR, 50 * p.u + 27 * p.u * 1.25)) FAIL("portrait: the D-pad reaches %.1f, the diamond's edge is %.1f", p.dpadR, 50 * p.u + 27 * p.u * 1.25);
+     }
+ 
+     // Every size and stick place on every screen, 2D and 3D: inside, and no overlap.

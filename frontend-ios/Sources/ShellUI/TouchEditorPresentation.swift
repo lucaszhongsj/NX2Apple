@@ -49,10 +49,6 @@ struct TouchEditorPresentation: UIViewControllerRepresentable {
                 }
                 editor.modalPresentationStyle = .fullScreen
                 editor.isModalInPresentation = true
-                // The iPhone Duo's division region is retired.
-                // if #available(iOS 27.1, *) {
-                //     editor.hasInnerDisplay = !(view.window?.reservedRegions(kind: .division, options: .includeInactive).isEmpty ?? true)
-                // }
                 self.editor = editor
                 transitioning = true
                 present(editor, animated: true) { [weak self] in
@@ -81,33 +77,11 @@ struct TouchEditorPresentation: UIViewControllerRepresentable {
             owner.dismiss(animated: true) { [weak self] in self?.onDismiss?() }
         }
 
-        var hasInnerDisplay = false
-        // private var hingeInteraction: UIInteraction?   // the iPhone Duo's hinge is retired
-
-        override func viewDidLoad() {
-            super.viewDidLoad()
-            // The iPhone Duo and iPad paths are retired: only ordinary iPhones run here.
-            // if #available(iOS 27.1, *) {
-            //     let interaction = UIHingeInteraction { [weak self] _, update in
-            //         guard let self else { return }
-            //         let inner = update.hinge.map { $0.status != .closed && $0.status != .unknown } ?? false
-            //         guard inner != self.hasInnerDisplay else { return }
-            //         self.hasInnerDisplay = inner
-            //         self.setNeedsUpdateOfSupportedInterfaceOrientations()
-            //         if !inner, self.traitCollection.userInterfaceIdiom == .phone {
-            //             self.view.window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: .landscape))
-            //         }
-            //     }
-            //     view.addInteraction(interaction)
-            //     hingeInteraction = interaction
-            // }
-        }
-
         override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-            traitCollection.userInterfaceIdiom == .phone && !hasInnerDisplay ? .landscape : .all
+            traitCollection.userInterfaceIdiom == .phone ? .landscape : .all
         }
         override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
-            guard traitCollection.userInterfaceIdiom == .phone, !hasInnerDisplay else {
+            guard traitCollection.userInterfaceIdiom == .phone else {
                 return presentingViewController?.view.window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .portrait
             }
             let current = presentingViewController?.view.window?.windowScene?.effectiveGeometry.interfaceOrientation

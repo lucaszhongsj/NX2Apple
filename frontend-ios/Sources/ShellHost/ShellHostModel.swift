@@ -1082,6 +1082,9 @@ public struct ShellHostConfig: Sendable {
     /// The right-stick hint's words: a few, no semicolon, short enough for the right third of a small phone.
     static var touchHint: String { hostText("Right stick: drag here") }
 
+    /// The bottom-bar hint's words: said once above the bar where a triple tap switches to the Tap layout.
+    static var navHint: String { hostText("Triple-tap the bar to switch to touch") }
+
     /// Shown once below the gear button when a physical controller is connected, fading with the button.
     static var padQuitHint: String { hostText("Hold {-} and {+} to quit") }
 
@@ -1109,6 +1112,8 @@ public struct ShellHostConfig: Sendable {
         for (key, value) in shellSettings.gameDefaults where env[key] == nil { env[key] = value }
         // The words the engine shows once per launch where the 3D layout's undrawn right stick is (patch 0067), in the player's language.
         env["DM_TOUCH_HINT"] = Self.touchHint
+        // The words the engine shows once over the panel's bottom bar, where a triple tap switches to Tap (DmGamepad.m).
+        env["DM_NAV_HINT"] = Self.navHint
         // Shown once below the gear button while a physical controller is connected, in the player's language.
         env["DM_PAD_QUIT_HINT"] = Self.padQuitHint
         // The quit prompt's words (patch 0068), as the Mac launcher passes them for its Home button prompt.

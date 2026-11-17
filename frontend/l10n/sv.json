@@ -1116,6 +1116,7 @@
   "ios.host.missingExternalShaders": "Shaderfilerna (msl) för det här spelet saknas i dess datamapp. Skicka eller kopiera speldatan igen från NX2Apple.",
   "ios.host.missingKey": "%@ saknar ”%@”.",
   "ios.host.missingKeyIn": "%@ saknar ”%@” (i %@).",
+  "ios.host.navHint": "Tryck tre gånger på listen för pek",
   "ios.host.noAdditional": "Inget extrainnehåll",
   "ios.host.noDataInFolder": "Ingen speldata för %@ hittades i mappen.",
   "ios.host.noLauncherJson": "Spelet har ingen launcher.json.",

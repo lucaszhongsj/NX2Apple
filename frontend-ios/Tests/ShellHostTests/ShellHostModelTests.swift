@@ -65,8 +65,8 @@ final class Clock: @unchecked Sendable { var date: Date; init(_ d: Date) { date 
         #expect(launcher.launched.last?.environment["DM_TOUCH_LAYOUT"] == nil, "reset: the engine's built-in layout")
     }
 
-    /// The engine draws the right-stick hint's words as they come (patch 0067), so the shell hands them over in the player's language.
-    @Test func everyGameGetsTheRightStickHintInThePlayersLanguage() async throws {
+    /// The engine draws the right-stick and bottom-bar hints' words as they come (patch 0067), so the shell hands them over in the player's language.
+    @Test func everyGameGetsTheHintWordsInThePlayersLanguage() async throws {
         let box = try Sandbox()
         try box.giveAppData()
         let launcher = RecordingLauncher()
@@ -74,6 +74,8 @@ final class Clock: @unchecked Sendable { var date: Date; init(_ d: Date) { date 
         await model.playNow(Fixtures.orbit)
         let hint = try #require(launcher.launched.last?.environment["DM_TOUCH_HINT"])
         #expect(hint == ShellHostModel.touchHint && !hint.isEmpty)
+        let navHint = try #require(launcher.launched.last?.environment["DM_NAV_HINT"])
+        #expect(navHint == ShellHostModel.navHint && !navHint.isEmpty)
         let padQuit = try #require(launcher.launched.last?.environment["DM_PAD_QUIT_HINT"])
         #expect(padQuit == ShellHostModel.padQuitHint && padQuit.contains("{-}") && padQuit.contains("{+}"))
     }

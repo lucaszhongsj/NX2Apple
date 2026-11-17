@@ -1116,6 +1116,7 @@
   "ios.host.missingExternalShaders": "该游戏的数据文件夹中缺少着色器文件（msl）。请从 NX2Apple 重新发送或复制游戏数据。",
   "ios.host.missingKey": "%@ 缺少 \"%@\"。",
   "ios.host.missingKeyIn": "%@ 缺少 \"%@\"（位于 %@）。",
+  "ios.host.navHint": "三击底栏切到触控",
   "ios.host.noAdditional": "无附加内容",
   "ios.host.noDataInFolder": "在该文件夹中未找到 %@ 的游戏数据。",
   "ios.host.noLauncherJson": "此游戏没有 launcher.json。",

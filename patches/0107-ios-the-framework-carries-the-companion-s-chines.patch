@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Wed, 18 Nov 2026 00:02:15 +0800
+Subject: [PATCH] ios: the framework carries the companion's Chinese words
+
+Upstream-Status: pending
+Reason: the framework carries the companion's Chinese words
+Issue: none yet: no upstream issue for the companion
+
+---
+ dm/ios/project-framework.yml | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/dm/ios/project-framework.yml b/dm/ios/project-framework.yml
+index 32f745b4..e3e125f2 100644
+--- a/dm/ios/project-framework.yml
++++ b/dm/ios/project-framework.yml
+@@ -161,6 +161,8 @@ targets:
+       - path: Sources/ACNHCompanion.swift
+       - path: Sources/EdenCompanion.swift
+       - path: Sources/DmHostingController.swift
++      - path: Sources/zh-Hans.lproj
++        buildPhase: resources
+       - path: Sources/CloudSaves.m
+       - path: Sources/SaveSync.m
+       - path: Sources/DataBookmark.m

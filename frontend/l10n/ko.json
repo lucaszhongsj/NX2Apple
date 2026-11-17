@@ -1116,6 +1116,7 @@
   "ios.host.missingExternalShaders": "이 게임의 데이터 폴더에 셰이더 파일(msl)이 없습니다. NX2Apple에서 게임 데이터를 다시 보내거나 복사하세요.",
   "ios.host.missingKey": "%@에 “%@”이(가) 없습니다.",
   "ios.host.missingKeyIn": "%@에 “%@”이(가) 없습니다 (%@ 안).",
+  "ios.host.navHint": "막대를 세 번 탭하여 터치로 전환",
   "ios.host.noAdditional": "추가 콘텐츠 없음",
   "ios.host.noDataInFolder": "그 폴더에서 %@의 게임 데이터를 찾지 못했습니다.",
   "ios.host.noLauncherJson": "이 게임에는 launcher.json이 없습니다.",

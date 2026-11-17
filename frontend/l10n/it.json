@@ -1116,6 +1116,7 @@
   "ios.host.missingExternalShaders": "Nella cartella dati di questo gioco mancano i file shader (msl). Invia o copia di nuovo i dati di gioco da NX2Apple.",
   "ios.host.missingKey": "%@ non ha “%@”.",
   "ios.host.missingKeyIn": "%@ non ha “%@” (in %@).",
+  "ios.host.navHint": "Tocca tre volte la barra per il tocco",
   "ios.host.noAdditional": "Nessun contenuto aggiuntivo",
   "ios.host.noDataInFolder": "Nella cartella non sono stati trovati dati di gioco per %@.",
   "ios.host.noLauncherJson": "Questo gioco non ha un launcher.json.",

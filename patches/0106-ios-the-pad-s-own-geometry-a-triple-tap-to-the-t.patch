@@ -1,0 +1,902 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Tue, 17 Nov 2026 23:58:08 +0800
+Subject: [PATCH] ios: the pad's own geometry, a triple tap to the touch layout
+
+The pad lays itself out in the band the panel leaves, a triple tap on the
+bottom bar switches to Tap, the gear fades in every touch layout, and the
+bar's hint says so once. The 3D layout forwards the touches no control
+takes when the profile asks.
+
+Upstream-Status: pending
+Reason: the pad lays itself out in the band the panel leaves, a triple tap switches to Tap, and the gear fades
+Issue: none yet: no upstream issue for the companion
+
+---
+ dm/host/hle_hid.c                             |  32 ++--
+ dm/host/hle_touch.c                           |   5 +-
+ dm/host/tests/t_hid.c                         |  26 +--
+ dm/ios/Sources/DmGameMenu.h                   |   2 +-
+ dm/ios/Sources/DmGamepad.m                    | 153 +++++++++++++-----
+ dm/ios/Sources/DmLayout.h                     |  22 ++-
+ dm/ios/Sources/DmPadGeometry.h                |  52 ++++--
+ dm/ios/Sources/GameMenu.swift                 |   6 +-
+ dm/ios/Sources/front_ios.m                    |  20 ++-
+ .../tests/pad_geometry/pad_geometry_check.m   |  67 +++++++-
+ 10 files changed, 270 insertions(+), 115 deletions(-)
+
+diff --git a/dm/host/hle_hid.c b/dm/host/hle_hid.c
+index df94f02c..a0bd6d02 100644
+--- a/dm/host/hle_hid.c
++++ b/dm/host/hle_hid.c
+@@ -1780,10 +1780,9 @@ HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideERKNS0_13StrapGuideArgE", "strap
+ HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", "controller firmware update applet; not shown by the host", Result, h_hid_FwUpd, const void *arg) { DM_APPLET("controller firmware update"); (void)arg; return RES_OK; }
+ 
+ // Touch screen: TouchScreenState<N> = { int64 sampling number; int32 count; int32 reserved; TouchState[N] }, filled from the front end's touch points (hle_touch.c touch_fill_n:
+-// the Mac's mouse, the iPhone touches no gamepad control takes, DM_KEYS taps) in handheld mode, as on the Switch, whose screen is out of reach when docked: a game may read touches
+-// without checking the mode, so in console mode the state has no touch points. Super Mario Galaxy's pointer is the touch screen in handheld mode. hle_touch.c numbers
+-// the states of both modes from its one count.
+-// A read makes a sample only when 4 ms have passed since the newest one (or the mode changed) and otherwise copies the newest, as the Switch's touch resource does: it writes the
++// the Mac's mouse, the iPhone touches the touch layouts forward, DM_KEYS taps) in either console mode: the front end decides what reaches the game (Tap, 2D, and the
++// 3D games whose profile forwards the touch screen), so the state carries its points docked too. Super Mario Galaxy's pointer is the touch screen. hle_touch.c numbers the states from its one count.
++// A read makes a sample only when 4 ms have passed since the newest one and otherwise copies the newest, as the Switch's touch resource does: it writes the
+ // screen's LIFO every 4 ms (yuzu: GestureUpdatePeriod), so two reads within 4 ms see one sample and a Start / End edge sits in exactly one sampling number. The last 16 samples are kept
+ // and GetTouchScreenStates returns the newest min(n, 16) of them, newest first, as Unity's reader expects (Pokemon Friends main+0xb00670 walks them from index n - 1 down and takes each
+ // number above the last it took). Two games need this. Animal Crossing: New Horizons reads twice in one original frame (its input manager at main+0x1b65260 and its own keyboard's
+@@ -1793,21 +1792,20 @@ HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUp
+ int touch_fill_n(void *out, int max, uint64_t now_ns, int points);
+ #define TOUCH_GRID_NS 4000000ull   // the touch sampler's period (250 Hz)
+ #define TOUCH_HIST 16              // samples kept: the most GetTouchScreenStates<16> returns
+-static pthread_mutex_t g_touch_mu = PTHREAD_MUTEX_INITIALIZER;   // guards the ring and the newest sample's time and mode; taken before hle_touch.c's g_tl
++static pthread_mutex_t g_touch_mu = PTHREAD_MUTEX_INITIALIZER;   // guards the ring and the newest sample's time; taken before hle_touch.c's g_tl
+ static uint8_t g_touch_hist[TOUCH_HIST][0x290];   // TouchScreenState<16>: 0x10 + 0x28 * 16
+-static int g_touch_kept, g_touch_newest, g_touch_points;   // samples kept (0-16), index of the newest, the points it was made with (1 handheld, 0 console)
++static int g_touch_kept, g_touch_newest;   // samples kept (0-16), index of the newest
+ static uint64_t g_touch_at;   // now_ns() of the newest
+-// Copy the newest min(want, kept) samples, newest first, into a TouchScreenState<N> array and return how many; a sample is made first when the grid or the mode asks for one
++// Copy the newest min(want, kept) samples, newest first, into a TouchScreenState<N> array and return how many; a sample is made first when the grid asks for one
+ static int touch_read(void *s, int N, int want) {
+     keys_sync();   // DM_KEYS frame steps due in this frame (their touches), before the read
+     size_t stride = 0x10 + 0x28 * (size_t)N;
+     pthread_mutex_lock(&g_touch_mu);
+     uint64_t now = now_ns();   // under the lock: read before it, another thread's newer sample would make now - g_touch_at wrap
+-    int handheld = dm_opmode() == 0;
+-    if (!g_touch_kept || now - g_touch_at >= TOUCH_GRID_NS || g_touch_points != handheld) {   // console mode: no touch points, as before
++    if (!g_touch_kept || now - g_touch_at >= TOUCH_GRID_NS) {
+         int next = g_touch_kept ? (g_touch_newest + 1) % TOUCH_HIST : 0;
+-        touch_fill_n(g_touch_hist[next], 16, now, handheld);
+-        g_touch_newest = next; g_touch_at = now; g_touch_points = handheld;
++        touch_fill_n(g_touch_hist[next], 16, now, 1);   // the points are there in either console mode
++        g_touch_newest = next; g_touch_at = now;
+         if (g_touch_kept < TOUCH_HIST) g_touch_kept++;
+     }
+     int cnt = want < g_touch_kept ? want : g_touch_kept;
+@@ -1822,7 +1820,7 @@ static int touch_read(void *s, int N, int want) {
+ void dm_hid_touch_teardown(void) {
+     pthread_mutex_lock(&g_touch_mu);
+     memset(g_touch_hist, 0, sizeof g_touch_hist);
+-    g_touch_kept = g_touch_newest = g_touch_points = 0;
++    g_touch_kept = g_touch_newest = 0;
+     g_touch_at = 0;
+     pthread_mutex_unlock(&g_touch_mu);
+ }
+@@ -1830,17 +1828,17 @@ HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "connect to the hid touch scree
+ // SDK 18 overload with two ints (Super Mario Galaxy); the SDK's own one opens the hid service and aborts in sm::Initialize
+ HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEii", "connect to the hid touch screen (SDK 18 two-argument version); the host takes touch points from the front end", void, h_hid_InitTouch2, int a, int b) { (void)a; (void)b; }
+ #define TOUCH(N) \
+-    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state (touch points only in handheld mode)", void, h_hid_Touch1_##N, void *s) { touch_read(s, N, 1); } \
+-    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: the newest min(n, 16) of a 16-sample history, newest first (touch points only in handheld mode)", int, h_hid_TouchN_##N, void *s, int n) { return n <= 0 ? 0 : touch_read(s, N, n > TOUCH_HIST ? TOUCH_HIST : n); }
++    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "touch screen current state", void, h_hid_Touch1_##N, void *s) { touch_read(s, N, 1); } \
++    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "touch screen states: the newest min(n, 16) of a 16-sample history, newest first", int, h_hid_TouchN_##N, void *s, int n) { return n <= 0 ? 0 : touch_read(s, N, n > TOUCH_HIST ? TOUCH_HIST : n); }
+ TOUCH(1) TOUCH(2) TOUCH(3) TOUCH(4) TOUCH(5) TOUCH(6) TOUCH(7) TOUCH(8) TOUCH(9) TOUCH(10) TOUCH(11) TOUCH(12) TOUCH(13) TOUCH(14) TOUCH(15) TOUCH(16)
+-// Gestures: recognized from the same touch points (hle_touch.c gesture_fill), so only in handheld mode too
++// Gestures: recognized from the same touch points (hle_touch.c gesture_fill)
+ int gesture_fill(void *out, int n, uint64_t now_ns);
+ HLE_FORCE("_ZN2nn3hid17InitializeGestureEv", "connect to the hid gesture recognizer; the host recognizes gestures from the touch points", void, h_hid_InitGesture, void) {}
+ // Two-argument overload (PRAGMATA, SDK 20.5.15): the SDK's own one opens the hid service and aborts in sm::Initialize (Result 0xe15), as the touch screen's above did
+ HLE_FORCE("_ZN2nn3hid17InitializeGestureEii", "connect to the hid gesture recognizer (two-argument version); the host recognizes gestures from the touch points", void, h_hid_InitGesture2, int a, int b) { (void)a; (void)b; }
+-HLE_FORCE("_ZN2nn3hid16GetGestureStatesEPNS0_12GestureStateEi", "gesture states, newest first (handheld mode: recognized from the touch points; console mode: none)", int, h_hid_Gestures, void *out, int n) {
++HLE_FORCE("_ZN2nn3hid16GetGestureStatesEPNS0_12GestureStateEi", "gesture states, newest first, recognized from the touch points", int, h_hid_Gestures, void *out, int n) {
+     keys_sync();
+-    return dm_opmode() == 0 ? gesture_fill(out, n, now_ns()) : 0;
++    return gesture_fill(out, n, now_ns());
+ }
+ 
+ // Six-axis details: the current state, at rest unless shaking, fusion off
+diff --git a/dm/host/hle_touch.c b/dm/host/hle_touch.c
+index 32236c7a..cdabc629 100644
+--- a/dm/host/hle_touch.c
++++ b/dm/host/hle_touch.c
+@@ -61,8 +61,9 @@ void dm_touch_script(const dm_touch *t, int n) { touch_apply(t, n); }
+ 
+ static int32_t clampi(float v, int hi) { int32_t r = (int32_t)(v * (float)(hi + 1)); return r < 0 ? 0 : r > hi ? hi : r; }
+ // Fill one TouchScreenState<max> (out is 0x10 + 0x28 · max bytes; max 1–16); now_ns is used for delta_time. Returns the number of touch points written.
+-// Fingers beyond max are left for a later read (their Start / End is not used up). points 0 is a read in console mode, when the screen is out of reach: the state
+-// has no touch points and the fingers are left as they are, but it takes the next sample number, so the numbers rise from sample to sample whatever the mode. Unity's
++// Fingers beyond max are left for a later read (their Start / End is not used up). points 0 still takes the next sample number, leaving the fingers as they are,
++// so the numbers rise from sample to sample. The front end decides what reaches the game (Tap, 2D, and 3D where the profile forwards the touch screen), so a read
++// in either console mode can carry points. Unity's
+ // touch reader (Aokana main+0xd2bde0) takes a state only if its number is above the last one it took, empty states included
+ int touch_fill_n(void *out, int max, uint64_t now_ns, int points) {
+     if (max < 1) max = 1; else if (max > 16) max = 16;
+diff --git a/dm/host/tests/t_hid.c b/dm/host/tests/t_hid.c
+index 9468bb67..1fe007b0 100644
+--- a/dm/host/tests/t_hid.c
++++ b/dm/host/tests/t_hid.c
+@@ -711,10 +711,11 @@ static void t_motion_hid(void) {
+     dm_motion_clear_hid(0); dm_motion_clear_hid(1); dm_motion_clear(0); g_phone_motion.last_ns = 0;
+     dm_pad_players(1); g_phone_mode = -1;
+ }
+-// Touch screen reads across docked <-> handheld: every state comes from a hle_touch.c sample, which numbers the states of both modes from one count (t_touch checks the numbers), with
+-// touch points asked for only in handheld mode. Numbered apart (docked from the npad counter, 65536; handheld from 1), a game started docked dropped every touch after
+-// leaving the dock: Unity's touch reader (Aokana main+0xd2bde0) takes a state only if its sampling number is above the last one it took, empty states included.
+-// A read makes a sample only 4 ms after the newest one (or on a mode change) and keeps the last 16, newest first (the touch resource's 4 ms LIFO); the clock only moves forward here.
++// Touch screen reads across docked <-> handheld: every state comes from a hle_touch.c sample, which numbers the states from one count (t_touch checks the numbers), and the
++// console mode no longer decides whether a state carries its touch points: the front end's Tap layout does, in either mode. Numbered apart (docked from the npad counter,
++// 65536; handheld from 1), a game started docked dropped every touch after leaving the dock: Unity's touch reader (Aokana main+0xd2bde0) takes a state only if its sampling
++// number is above the last one it took, empty states included.
++// A read makes a sample only 4 ms after the newest one and keeps the last 16, newest first (the touch resource's 4 ms LIFO); the clock only moves forward here.
+ static void touch_hist_clear(void) { g_touch_kept = 0; }
+ static int64_t touch_num(const uint8_t *p) { int64_t v; memcpy(&v, p, 8); return v; }
+ static int32_t touch_cnt(const uint8_t *p) { int32_t v; memcpy(&v, p + 8, 4); return v; }
+@@ -729,7 +730,7 @@ static void t_touch_sampling(void) {
+         if (i & 1) CHECK(h_hid_TouchN_16(s, 1) == 1, "touch: GetTouchScreenStates gives one state");
+         else h_hid_Touch1_16(s);
+         v = touch_num(s);
+-        CHECK(touch_points == !modes[i], "touch: touch points are asked for in handheld mode only");
++        CHECK(touch_points == 1, "touch: touch points are asked for in either console mode");
+         CHECK(v > prev, i == 2 ? "touch: handheld after docked continues the sampling numbers" : i == 4 ? "touch: docked after handheld continues the sampling numbers"
+                                 : i == 5 ? "touch: handheld again continues the sampling numbers" : "touch: sampling numbers increase");
+         prev = v;
+@@ -783,14 +784,13 @@ static void t_touch_sampling(void) {
+     CHECK(h_hid_TouchN_16(h, 2) == 2, "touch: the history holds the Start sample and the next one");
+     int32_t at0, at1; memcpy(&at0, h + 0x10 + 0x08, 4); memcpy(&at1, h + 0x290 + 0x10 + 0x08, 4);
+     CHECK(at0 == 0 && at1 == 1 && touch_num(h + 0x290) == start_no && touch_num(h) > start_no, "touch: a later reader finds the Start at index 1 of the history");
+-    // A mode change within 4 ms still makes a sample asked for in the new mode; two console reads within 4 ms share one
+-    touch_stub_n = 0; touch_stub_attr[0] = 0; motion_now += TOUCH_GRID_NS; g_mode = 0; h_hid_Touch1_16(s);
+-    int64_t n0 = touch_samp; g_mode = 1; motion_now += 1; h_hid_Touch1_16(s);
+-    CHECK(touch_samp == n0 + 1 && touch_points == 0, "touch: handheld to docked within 4 ms makes a sample without points");
+-    motion_now += 1; h_hid_Touch1_16(s2);
+-    CHECK(touch_samp == n0 + 1 && touch_num(s2) == touch_num(s), "touch: two docked reads within 4 ms share a sampling number");
+-    g_mode = 0; motion_now += 1; h_hid_Touch1_16(s);
+-    CHECK(touch_samp == n0 + 2 && touch_points == 1 && touch_num(s) > touch_num(s2), "touch: docked to handheld within 4 ms makes a sample asking for points");
++    // The console mode no longer gates touch points: a docked read asks for them, and a mode change within 4 ms neither makes a sample nor drops them
++    touch_stub_n = 1; touch_stub_attr[0] = 0; touch_hist_clear(); motion_now += TOUCH_GRID_NS; g_mode = 1; h_hid_Touch1_16(s);
++    CHECK(touch_points == 1 && touch_cnt(s) == 1, "touch: a docked read carries the touch points");
++    int64_t n0 = touch_samp; g_mode = 0; motion_now += 1; memset(s2, 0xA5, sizeof s2); h_hid_Touch1_16(s2);
++    CHECK(touch_samp == n0 && touch_points == 1 && touch_num(s2) == touch_num(s), "touch: a mode change within 4 ms shares the sample, points and all");
++    motion_now += TOUCH_GRID_NS; memset(s2, 0xA5, sizeof s2); h_hid_Touch1_16(s2);
++    CHECK(touch_samp == n0 + 1 && touch_points == 1 && touch_cnt(s2) == 1, "touch: the next sample, whichever the mode, still carries them");
+     // n <= 0 returns 0, writes nothing and makes no sample
+     memset(h, 0xA5, sizeof h); motion_now += TOUCH_GRID_NS; int64_t n1 = touch_samp;
+     CHECK(h_hid_TouchN_16(h, 0) == 0 && h_hid_TouchN_16(h, -1) == 0, "touch: n <= 0 returns 0");
+diff --git a/dm/ios/Sources/DmGameMenu.h b/dm/ios/Sources/DmGameMenu.h
+index 1aab2dfc..bb23f4ec 100644
+--- a/dm/ios/Sources/DmGameMenu.h
++++ b/dm/ios/Sources/DmGameMenu.h
+@@ -9,7 +9,7 @@ extern "C" {
+ void *dm_game_menu(void);   // GameMenu.swift: a retained UIMenu, rebuilt each time it opens
+ int dm_opmode(void);   // hle_oe.c: 0 = handheld (GameMenu.swift's console mode row reads it)
+ int dm_pad_layout(void);   // DmGamepad.m: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
+-bool dm_pad_layout_offered(int layout);   // Tap only in handheld mode
++bool dm_pad_layout_offered(int layout);   // 0/1/2 are valid; the menu lists 3D and Tap, and Tap not on a TV (no picture on the phone)
+ void dm_pad_layout_set(int layout);   // releases every touch first, and is saved for the next start
+ void dm_gamepad_touch_feedback(bool on);   // DM_TOUCH_HAPTICS
+ bool dm_setting_live(const char *env, const char *value);
+diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
+index c8ceb94d..47192ead 100644
+--- a/dm/ios/Sources/DmGamepad.m
++++ b/dm/ios/Sources/DmGamepad.m
+@@ -1,12 +1,12 @@
+ // Virtual gamepad (Nintendo button positions) + physical controllers (GameController), handed to the host through dm_input_set and dm_pad_set_player (hle_hid.c, bit layout in dm_input.h).
+-//   Two layouts, three in handheld mode, picked in the in-game menu (GameMenu.swift) that the menu button at the top centre (a gear) opens; the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
++//   Three layouts, 2D, 3D and Tap, picked in the in-game menu (GameMenu.swift) that the menu button at the top centre (a gear) opens; the menu no longer offers 2D, and a saved 2D choice still applies. The choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
+ //   The menu button hides when a physical controller is in use and the picture is on a TV. On the device screen it fades out after 3 idle seconds while a physical controller is in use and returns for 3 seconds on any screen touch. Its last item quits the game
+ //     (a prompt, front_ios.m), and so does holding a controller's Home button for 2 seconds.
+-//   Tap (touch): no control but the menu button, every other touch goes to the game's local touch viewport; offered only while the game is in handheld mode, the only one in which it reads the touch screen (Balatro, played by touch).
++//   Tap (touch): no control but the menu button, every other touch goes to the game's local touch viewport, docked or handheld (Balatro, played by touch). It always sends touches to the game; 3D does so only where the game profile sets touch_forward.
+ //   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
+ //     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
+ //   3D (full, Pro Controller style): everything in 2D (left stick and diamond keep their place and size), plus a D-pad (inward of and below the left stick, 8-way), a right stick that is not drawn
+-//     (a touch landing in the right third of the screen on no control holds it: centred where it lands, the centre dragged along once the finger passes the stick radius) and L3 / R3 (small round keys in the top row, inward of ZL / ZR).
++//     (a touch landing in the right third of the screen on no control holds it: centred where it lands, the centre dragged along once the finger passes the stick radius; the portrait split draws it, and it then holds a fixed ring as the left one does) and L3 / R3 (small round keys in the top row, inward of ZL / ZR).
+ //     Breath of the Wild crouches with L3 and uses the scope with R3; 3D World and Breath of the Wild turn the camera with the right stick.
+ //     The first time the 3D layout shows in a launch, a few words (DM_TOUCH_HINT) say where the undrawn right stick is, for two seconds; see "The right-stick hint".
+ //   Touch-down ownership (dm_pad_menu_takes and dm_pad_hit in DmPadGeometry.h): the menu button where it is nearer than a locked key (a view of its own, DmMenuButton), locked keys next (shoulders, − / +, L3 / R3), then whichever of the diamond, the D-pad and the left stick has the smallest distance / grab radius (the left stick's grab circle borders the D-pad),
+@@ -14,7 +14,7 @@
+ //   The player can move single controls in the shell's settings (DM_TOUCH_LAYOUT, one arrangement per layout): the geometry places each only where it fits and keeps the rest where they were.
+ //   Everything hugs the edges and corners to leave the picture room; controls sit over the picture, one CAShapeLayer each: a press only swaps the fill, a stick only moves its knob, nothing redraws the whole screen.
+ //   Where each control sits is DmPadGeometry.h (pure, tested on the Mac); the player picks the size there through DM_TOUCH_SIZE (small, medium, large; a size that does not fit the screen moves toward medium) and the left stick's place through DM_TOUCH_STICK (corner, higher, inward).
+-//   Touches no control takes (in 3D, those outside the right third) go to the game's touch screen when DmLayout assigns a local game viewport (pushGame; Super Mario Galaxy's pointer in handheld mode).
++//   Touches no control takes (in 3D, those outside the right third) go to the game's touch screen when DmLayout assigns a local game viewport (pushGame). Tap and 2D always forward; 3D does only where the game profile sets touch_forward (Super Mario Galaxy's pointer, DM_TOUCH_FORWARD overrides).
+ //   The touch sticks and keys hide while a physical controller is connected and return when it is removed. Unclaimed touches go to the game only when a local game viewport exists. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller); a Nintendo pad maps by its labels (pad_apple.h).
+ //   Each physical controller is a player of its own (local co-op), as on the Mac: the first one connected is player 1, together with the touch gamepad, the next player 2, and so on up to 8; see "Physical controllers" below.
+ //   Shaking the phone shakes the controller (DM_BTN_SHAKE: its six-axis sensor, hle_hid.c), whichever controls are in use; see "Shaking the phone" below.
+@@ -23,6 +23,7 @@
+ #import <CoreMotion/CoreMotion.h>
+ #import <CoreText/CoreText.h>
+ #include <pthread.h>
++#include <strings.h>
+ #include "dm.h"
+ #include "dm_input.h"
+ #include "front.h"
+@@ -128,7 +129,6 @@ static const CGFloat                               // (the grab radii of the sti
+     K_MENU_IDLE = 3.0;                              // seconds a connected controller leaves the menu gear visible before fading it out
+ static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
+ static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
+-int dm_opmode(void);   // hle_oe.c: 0 = handheld
+ void front_ios_quit_poll(void);          // front_ios.m: a controller's buttons changed (the Home hold, A and B in the quit prompt)
+ int front_ios_quit_blocks_input(void);   // front_ios.m: the quit prompt has the controllers, the game gets none
+ void front_ios_quit_controllers(void);   // front_ios.m: the controllers changed (it reads the Home button setting once)
+@@ -142,6 +142,7 @@ void front_ios_quit_controllers(void);   // front_ios.m: the controllers changed
+ - (void)wakeMenu;
+ - (void)setMenuOpen:(BOOL)open;
+ - (BOOL)controllerConnected;
++- (BOOL)tapOffered;   // NO on a TV: the phone has no picture to map a touch onto
+ @end
+ // The menu button: a UIButton whose menu is the in-game menu (UIKit draws it and takes the touches while it is open). Its hit circle is larger than the drawn one, and a key nearer
+ // to the touch wins (− / + sit beside it), so it asks the pad
+@@ -163,13 +164,14 @@ static void pads_start(void);   // Physical controllers, below
+ @implementation DmGamepad {
+     NSMapTable<UITouch *, NSNumber *> *_owner;     // touch → control (with the key for C_BTN or the stick for C_STICK, << 8)
+     UITouch *_stick[2]; CGPoint _stickNow[2];      // the touch holding each stick and where it is now (0 left, 1 right)
+-    CGPoint _rCentre;                              // the right stick's centre: it follows the finger, so the whole stick moves with it
+-    CGPoint _rAnchor;                              // the right stick's anchor: where the touch landed, the direction's origin
++    CGPoint _rCentre;                              // the undrawn right stick's centre (the right third): it follows the finger, so the whole stick moves with it
++    CGPoint _rAnchor;                              // the undrawn right stick's anchor: where the touch landed, the direction's origin
+     uint64_t _faceBits, _dpadBits, _btnBits;
+     NSMapTable<UITouch *, NSNumber *> *_faceOf;    // which keys each touch on the diamond currently holds
+     CAShapeLayer *_key[B_N]; CATextLayer *_label[B_N];   // one layer per key
+     CAShapeLayer *_ring, *_knob, *_rring, *_rknob;   // the sticks; the right one is drawn only where the geometry gives it a place (DmPadGeo.rstickDrawn)
+     CALayer *_hint; CATextLayer *_hintText; NSString *_hintWords;   // the 3D layout's right-stick hint: words only, once per launch (see "The right-stick hint")
++    CALayer *_navHint; CATextLayer *_navHintText; NSString *_navHintWords;   // the bottom bar's triple-tap hint, once per launch after the right-stick one
+     DmMenuButton *_menu;                           // opens the in-game menu (GameMenu.swift)
+     UIView *_padHint; CAShapeLayer *_padHintBg;    // controller quit hint below _menu: shown once per launch with keycap pills, fades with _menu
+     NSString *_padHintWords; BOOL _padHintShown;
+@@ -179,8 +181,11 @@ static void pads_start(void);   // Physical controllers, below
+     unsigned _hapticSticks;
+     BOOL _stickShown;                              // the left stick was held at the last refresh
+     BOOL _full, _tap;                              // the 3D layout / the Tap layout is current
++    NSTimeInterval _navTapAt;                      // the last of the panel bottom bar's triple tap that switches to Tap
++    int _navTaps;                                  // taps of that triple so far, cleared when the next one comes too late
++    BOOL _gameTouch;                               // 3D: touches that hit no control go to the game (DM_TOUCH_FORWARD, the profile's touch_forward; off by default)
+     CALayer *_controls;                            // holds every control layer: hidden while a physical controller is connected (the view itself stays, for game touches)
+-    BOOL _padOff;                                  // a physical controller is connected: every touch goes to the game
++    BOOL _padOff;                                  // a physical controller is connected: the controls hide, and the forwarding rule still decides what reaches the game
+     DmLayout _layout;
+     DmPadOptions _opts;                            // the player's options from the environment (DM_TOUCH_SIZE, DM_TOUCH_STICK, DM_TOUCH_LAYOUT)
+     DmPadLayout _arrangement;                      // DM_TOUCH_LAYOUT, which _opts.layout points to
+@@ -201,7 +206,11 @@ static CATextLayer *label(CALayer *parent, NSString *s) {
+     t.string = s; t.alignmentMode = kCAAlignmentCenter; t.foregroundColor = k_text.CGColor;
+     [parent addSublayer:t]; return t;
+ }
+-static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   // keys shown only in the 3D layout
++static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }
++// DM_TOUCH_FORWARD, with the same words as the profile's key: 1/on/yes/true (any case) on; 0/off/no/false/empty off.
++static BOOL envTruthy(const char *v) {
++    return v && !(v[0] == '0' || !strcasecmp(v, "off") || !strcasecmp(v, "no") || !strcasecmp(v, "false") || !v[0]);
++}   // keys shown only in the 3D layout
+ 
+ - (instancetype)initWithFrame:(CGRect)f {
+     if ((self = [super initWithFrame:f])) {
+@@ -266,10 +275,16 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }
+         _hint = [CALayer layer]; _hint.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5].CGColor; _hint.opacity = 0; _hint.hidden = YES;
+         _hintText = [CATextLayer layer]; _hintText.string = _hintWords; _hintText.alignmentMode = kCAAlignmentCenter;
+         _hintText.foregroundColor = [UIColor colorWithWhite:1 alpha:0.9].CGColor; [_hint addSublayer:_hintText]; [_controls addSublayer:_hint];
++        const char *navHint = getenv("DM_NAV_HINT");   // the shell passes the player's language; empty turns the hint off
++        _navHintWords = navHint ? [NSString stringWithUTF8String:navHint] : @"Triple-tap the bar to switch to touch";
++        _navHint = [CALayer layer]; _navHint.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5].CGColor; _navHint.opacity = 0; _navHint.hidden = YES;
++        _navHintText = [CATextLayer layer]; _navHintText.string = _navHintWords; _navHintText.alignmentMode = kCAAlignmentCenter;
++        _navHintText.foregroundColor = [UIColor colorWithWhite:1 alpha:0.9].CGColor; [_navHint addSublayer:_navHintText]; [self.layer addSublayer:_navHint];
+         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
+         int l = saved ? (int)saved.integerValue : dm_profile()->pad_layout;
+-        if (l == 2 && dm_opmode() != 0) l = 0;   // Tap only in handheld mode (env.txt's DM_OPMODE may have changed it)
+         _full = l == 1; _tap = l == 2;
++        const char *forward = getenv("DM_TOUCH_FORWARD");
++        _gameTouch = forward ? envTruthy(forward) : dm_profile()->touch_forward != 0;
+         [self applyLayout];
+         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+         [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidConnectNotification object:nil];
+@@ -287,20 +302,19 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }
+     for (int b = 0; b < B_N; b++) _key[b].hidden = _tap || (fullOnly(b) && !_full);
+     _ring.hidden = _knob.hidden = _tap;
+     _rring.hidden = _rknob.hidden = _tap || !self.geo->rstickDrawn;
++    if (!_padOff) _menu.alpha = 1;
+     [CATransaction commit];
++    if (!_padOff) [self wakeMenu];
+ }
+ - (int)padLayout { return _tap ? 2 : _full ? 1 : 0; }
++- (BOOL)tapOffered { return !_layout.onTV; }   // a TV has no picture on the phone for a touch to land on
+ - (void)setPadLayout:(int)l {   // the in-game menu's pick: release every touch first (no key stays held), save, lay out again
+-    if (l == 2 && dm_opmode() != 0) l = 0;
++    if (l == 2 && _layout.onTV) l = 0;   // a TV has no picture on the phone for a touch to land on: Tap falls back to 2D, unsaved
+     [self reset];
+     _full = l == 1; _tap = l == 2;
+     [NSUserDefaults.standardUserDefaults setObject:@(l) forKey:k_layout_key];
+     [self applyLayout]; [self setNeedsLayout];
+ }
+-- (void)opmodeChanged {   // docked: the Tap layout goes (the game reads no touch screen then), unsaved, so handheld mode at the next start brings it back
+-    if (!_tap || dm_opmode() == 0) return;
+-    [self reset]; _tap = NO; _full = NO; [self applyLayout]; [self setNeedsLayout];
+-}
+ - (void)setTouchFeedback:(BOOL)on {
+     if (!on) { _touchFeedback = nil; return; }
+     if (!_touchFeedback) { _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [_touchFeedback prepare]; }
+@@ -313,6 +327,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }
+         && _layout.onTV == layout.onTV) return;
+     [self reset];   // A finger held across a pose change must not leave a key or game touch stuck.
+     _layout = layout; _geoValid = NO;
++    if (_layout.onTV && _tap) { _tap = NO; _full = NO; }   // Tap has no picture on the phone to map a touch onto
+     [self updateControlVisibility];
+     [self setNeedsLayout];
+ }
+@@ -337,11 +352,12 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }
+ - (CGFloat)faceHitR { return self.geo->faceHitR; }
+ - (CGPoint)facePos:(int)b { return dm_pad_face_key(self.geo, b - B_A); }   // B_A..B_Y are A, B, X, Y: the geometry's order
+ - (CGPoint)stickHome { return self.geo->stick; }
+-- (CGPoint)stickCentre:(int)i { return i ? (_stick[1] || !self.geo->rstickDrawn ? _rCentre : self.geo->rstick) : self.stickHome; }
++- (CGPoint)stickCentre:(int)i { return i ? (self.geo->rstickDrawn ? self.geo->rstick : _rCentre) : self.stickHome; }
+ - (CGFloat)stickR:(int)i { return i ? (self.geo->rstickDrawn ? self.geo->rstickR : K_RSTICK_R * self.u) : self.geo->stickR; }
+-// The right stick: its own circle where the split draws one, the right third of the controls otherwise (centred where the touch lands).
++// The right stick: its own circle where the split draws one, the left stick's place and grab radius; the right third of the controls otherwise
++// (centred where the touch lands).
+ - (BOOL)inRightArea:(CGPoint)p {
+-    if (self.geo->rstickDrawn) return dist(p, self.geo->rstick) <= self.geo->rstickR * 1.15;
++    if (self.geo->rstickDrawn) return dist(p, self.geo->rstick) <= MAX(self.geo->rstickR, 22);
+     CGRect b = _layout.controls; return p.x >= CGRectGetMaxX(b) - b.size.width * K_RSWIPE;
+ }
+ - (CGPoint)dpadCenter { return self.geo->dpad; }
+@@ -380,11 +396,11 @@ static int lockedKey(int c) {   // DmPadGeometry.h's control → the key it pres
+     if (a < -22.5 && a > -157.5) m |= 1ull << B_DOWN;
+     return m;
+ }
+-// The knob's offset from the stick's centre, clamped to the stick's radius. The right stick follows the finger, so its offset is the finger's
+-// distance from where the touch landed: the stick moves with the finger and still reads the direction the finger turns in.
++// The knob's offset from the stick's centre, clamped to the stick's radius. The drawn right stick reads the finger's place in its ring, as the
++// left stick does; the undrawn one follows the finger, so its offset is the finger's distance from where the touch landed.
+ - (CGPoint)knobOffset:(int)i {
+     if (!_stick[i]) return CGPointZero;
+-    CGPoint o = i == 1 ? _rAnchor : self.stickHome;
++    CGPoint o = i != 1 ? self.stickHome : (self.geo->rstickDrawn ? self.geo->rstick : _rAnchor);
+     CGFloat dx = _stickNow[i].x - o.x, dy = _stickNow[i].y - o.y, d = hypot(dx, dy), R = [self stickR:i];
+     if (d > R) { dx *= R / d; dy *= R / d; }
+     return CGPointMake(dx, dy);
+@@ -416,12 +432,13 @@ static int lockedKey(int c) {   // DmPadGeometry.h's control → the key it pres
+     g_touch_btn = face | dpad | btn; g_touch_lx = ax[0]; g_touch_ly = ax[1]; g_touch_rx = ax[2]; g_touch_ry = ax[3];
+     pthread_mutex_unlock(&g_mu);
+     publish();
+-    BOOL stick = _stick[0] != nil;   // only the left stick is drawn: the right one needs no refresh
+-    if (changed || stick || _stickShown) [self refresh];   // also refresh on the stick release so the knob returns to the centre
++    BOOL stick = _stick[0] != nil || (self.geo->rstickDrawn && _stick[1] != nil);   // the split draws the right stick too
++    if (changed || stick || _stickShown) [self refresh];   // also refresh on a stick's release so its knob returns to the centre
+     _stickShown = stick;
+ }
+-// Touches no control takes go to the game's touch screen, normalized on front_ios.m's actual 16:9 viewport (including portrait and tabletop splits, and the cropped Fill picture): Super Mario Galaxy's pointer in handheld mode (profile op_mode). The host reports them only in handheld mode, as on the Switch (hle_hid.c touch_read)
++// Touches no control takes go to the game's touch screen, normalized on front_ios.m's actual 16:9 viewport (including portrait and tabletop splits, and the cropped Fill picture): Super Mario Galaxy's pointer. Tap and 2D always do; 3D only where the game profile sets touch_forward (DM_TOUCH_FORWARD overrides). The host reports them in either console mode (hle_hid.c touch_read).
+ - (void)pushGame {
++    if (!_tap && _full && !_gameTouch) { dm_touch_set(NULL, 0); return; }
+     CGRect b = _layout.game;
+     if (b.size.width <= 0 || b.size.height <= 0) { dm_touch_set(NULL, 0); return; }
+     dm_touch t[16]; int n = 0;
+@@ -470,18 +487,34 @@ int front_web_touch(void);
+     }
+     BOOL game = NO;
+     for (UITouch *t in ts) {
+-        if (_padOff) { game |= [self gameBegin:t]; continue; }
++        if (_padOff) { if (_tap || !_full || _gameTouch) game |= [self gameBegin:t]; continue; }   // Tap and 2D always; 3D only where the profile asks for its touch screen
+         CGPoint p = [t locationInView:self];
+-        if (_layout.separated && !CGRectContainsPoint(_layout.controls, p)) { game |= [self gameBegin:t]; continue; }
++        if (_layout.separated && !CGRectContainsPoint(_layout.controls, p)) { if (_tap || !_full || _gameTouch) game |= [self gameBegin:t]; continue; }
+         DmPadHit hit = dm_pad_hit(self.geo, _full, _layout.separated, _tap, !_stick[0], p);   // the same geometry the controls are drawn with (the menu button took its own touches, menuTakes)
+         if (hit.kind == DM_PAD_HIT_KEY) { [_owner setObject:@(C_BTN | (uint64_t)lockedKey(hit.key) << 8) forKey:t]; continue; }
+         if (_tap) { game |= [self gameBegin:t]; continue; }
++        // The panel's bottom bar sits below every control: a triple tap anywhere on it (the bottom 56 points of the band, so the
++        // bottom edge is included) switches to Tap, where the panel is the screen's input. Three taps a quarter second apart keep a
++        // mis-aimed double tap from switching; every tap is swallowed, so one cannot become a game touch either.
++        if (hit.kind == DM_PAD_HIT_NONE && _layout.separated && p.y >= CGRectGetMaxY(_layout.controls) - 56) {
++            NSTimeInterval now = t.timestamp;
++            if (_navTapAt > 0 && now - _navTapAt <= 0.25) {
++                if (++_navTaps >= 3) { _navTapAt = 0; _navTaps = 0; [self setPadLayout:2]; }
++                else { _navTapAt = now; }
++            } else { _navTapAt = now; _navTaps = 1; }
++            continue;
++        }
+         int kind = hit.kind == DM_PAD_HIT_FACE ? C_FACE : hit.kind == DM_PAD_HIT_DPAD ? C_DPAD : hit.kind == DM_PAD_HIT_STICK ? C_STICK : C_NONE, idx = 0;
+-        if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; _rAnchor = p; [self hideHint]; }   // the right stick: a drawn circle starts it, then the whole stick follows the finger
++        if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) {
++            // The drawn circle is held like the left stick's ring; the undrawn right third starts where the touch lands and moves with the finger.
++            kind = C_STICK; idx = 1;
++            if (!self.geo->rstickDrawn) { _rCentre = p; _rAnchor = p; }
++            [self hideHint];
++        }
+         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
+         else if (kind == C_DPAD) [_owner setObject:@(C_DPAD) forKey:t];
+         else if (kind == C_STICK) { [_owner setObject:@(C_STICK | (uint64_t)idx << 8) forKey:t]; _stick[idx] = t; _stickNow[idx] = p; }
+-        else game |= [self gameBegin:t];
++        else if (!_full || _gameTouch) game |= [self gameBegin:t];   // 2D, or 3D where the profile asks for the touch screen
+     }
+     if (game) [self pushGame];
+     [self recompute];
+@@ -492,7 +525,7 @@ int front_web_touch(void);
+         uint64_t v = [_owner objectForKey:t].unsignedLongLongValue; int c = (int)(v & 0xff); CGPoint p = [t locationInView:self];
+         if (c == C_FACE) [_faceOf setObject:@([self faceAt:p]) forKey:t];
+         else if (c == C_STICK) { _stickNow[v >> 8] = p;
+-            if ((v >> 8) == 1) _rCentre = p; }   // the right stick follows the finger: the whole stick moves with it
++            if ((v >> 8) == 1 && !self.geo->rstickDrawn) _rCentre = p; }   // the undrawn right stick follows the finger
+         else if (c == C_GAME) game = YES;
+     }
+     if (game) [self pushGame];
+@@ -576,7 +609,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
+     CAShapeLayer *in = (CAShapeLayer *)_knob.sublayers.firstObject; CGPathRef ip = circlePath(CGPointMake(k, k), k * 0.62);
+     in.frame = _knob.bounds; in.path = ip; CGPathRelease(ip);
+     if (self.geo->rstickDrawn) {   // the split's right stick, drawn like the left one (DmPadGeometry.h)
+-        CGPoint rc = [self stickCentre:1];   // the ring follows the finger: the whole stick moves with it
++        CGPoint rc = [self stickCentre:1];   // the split's ring keeps its place, as the left one does
+         setPath(_rring, circlePath(rc, self.geo->rstickR));
+         _rknob.bounds = _knob.bounds;
+         setPath(_rknob, circlePath(CGPointMake(k, k), k));
+@@ -585,6 +618,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
+     }
+     [CATransaction commit];
+     [self placeHint];
++    [self placeNavHint];
+     if (!_padHint.hidden) [self placePadHint];
+     else if (_padOff && !_layout.onTV && !_menuOpen && ![self voiceOverRunning] && !_padHintShown && _padHintWords.length && !CGRectIsEmpty(self.bounds)) [self wakeMenu];
+     [self refresh];
+@@ -628,6 +662,43 @@ static BOOL g_hintShown;   // once per launch
+     _hint.opacity = 0;   // an implicit fade
+     [CATransaction commit];
+ }
++// ---- The bottom bar's hint ----
++// The 3D layout's bottom bar is where a triple tap switches to Tap, and nothing on screen says so. The first time the 3D layout
++// shows in a launch, a few words over the bar say it, after the right-stick hint has gone. DM_NAV_HINT carries the words
++// (the shell's language), empty turns it off; without it the words are English.
++static BOOL g_navHintShown;   // once per launch
++- (void)placeNavHint {
++    BOOL fits = _full && !_tap && !_padOff && _layout.separated && _navHintWords.length && !CGRectIsEmpty(self.bounds);
++    if (!fits) { if (!_navHint.hidden) { _navHint.hidden = YES; _navHint.opacity = 0; } return; }
++    CGFloat u = self.u, fs = fmin(fmax(13 * u, 12), 17);
++    UIFont *font = [UIFont systemFontOfSize:fs weight:UIFontWeightSemibold];
++    CGSize t = [_navHintWords sizeWithAttributes:@{NSFontAttributeName: font}];
++    CGFloat boxW = fmin(ceil(t.width) + 2 * fs, CGRectGetWidth(_layout.controls) - 16), boxH = ceil(t.height) + fs * 0.8;
++    CGRect r = CGRectMake(CGRectGetMidX(_layout.controls) - boxW / 2, CGRectGetMaxY(_layout.controls) - 56 - 8 - boxH, boxW, boxH);
++    if (CGRectGetMinY(r) < self.safeAreaInsets.top) { if (!_navHint.hidden) { _navHint.hidden = YES; _navHint.opacity = 0; } return; }
++    [CATransaction begin]; [CATransaction setDisableActions:YES];
++    _navHint.frame = r; _navHint.cornerRadius = boxH / 2;
++    CTFontRef f = CTFontCreateUIFontForLanguage(kCTFontUIFontEmphasizedSystem, fs, NULL); _navHintText.font = f; _navHintText.fontSize = fs; CFRelease(f);
++    _navHintText.contentsScale = MAX(self.traitCollection.displayScale, 1);
++    _navHintText.frame = CGRectMake(0, (boxH - ceil(t.height)) / 2, boxW, ceil(t.height));
++    [CATransaction commit];
++    if (g_navHintShown) return;   // already shown once: only follow the layout
++    g_navHintShown = YES;
++    LOG("front end: bottom-bar hint shown");
++    _navHint.hidden = NO;
++    __weak DmGamepad *weak = self;
++    // The right-stick hint has the screen first; this one follows it, then fades.
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
++        DmGamepad *s = weak; if (!s || s->_navHint.hidden) return;
++        [CATransaction begin]; [CATransaction setAnimationDuration:0.3]; s->_navHint.opacity = 1; [CATransaction commit];
++    });
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
++        DmGamepad *s = weak; if (!s) return;
++        [CATransaction begin]; [CATransaction setAnimationDuration:0.4];
++        [CATransaction setCompletionBlock:^{ s->_navHint.hidden = YES; }];
++        s->_navHint.opacity = 0; [CATransaction commit];
++    });
++}
+ - (void)safeAreaInsetsDidChange { [super safeAreaInsetsDidChange]; [self setNeedsLayout]; }
+ - (void)refresh {   // pressed state → fill, sticks → knob position
+     uint64_t all = _faceBits | _dpadBits | _btnBits;
+@@ -637,7 +708,7 @@ static BOOL g_hintShown;   // once per launch
+     CGPoint h = self.stickHome, o = [self knobOffset:0];
+     _knob.position = CGPointMake(h.x + o.x, h.y + o.y); _knob.fillColor = (_stick[0] ? k_on : k_idle).CGColor;
+     if (self.geo->rstickDrawn) { CGPoint rh = [self stickCentre:1], ro = [self knobOffset:1];
+-        setPath(_rring, circlePath(rh, self.geo->rstickR));   // the ring follows the finger: the whole stick moves with it
++        setPath(_rring, circlePath(rh, self.geo->rstickR));   // the split's ring keeps its place, as the left one does
+         _rknob.position = CGPointMake(rh.x + ro.x, rh.y + ro.y); _rknob.fillColor = (_stick[1] ? k_on : k_idle).CGColor; }
+     [CATransaction commit];
+ }
+@@ -835,8 +906,8 @@ static BOOL pads_slotted(GCController *gone) {
+     unsigned gen = ++_menuGen;
+     [_menu.layer removeAllAnimations];
+     _menu.hidden = NO; _menu.alpha = 1;
+-    if (!_padOff || _layout.onTV || _menuOpen || [self voiceOverRunning]) { [self hidePadHintNow]; return; }
+-    if (!_padHintShown && _padHintWords.length && !CGRectIsEmpty(self.bounds)) {
++    if (_layout.onTV || _menuOpen || [self voiceOverRunning]) { [self hidePadHintNow]; return; }
++    if (_padOff && !_padHintShown && _padHintWords.length && !CGRectIsEmpty(self.bounds)) {
+         _padHintShown = YES;
+         [self placePadHint];
+         [_padHint.layer removeAllAnimations];
+@@ -846,14 +917,16 @@ static BOOL pads_slotted(GCController *gone) {
+     __weak DmGamepad *weak = self;
+     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(K_MENU_IDLE * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+         DmGamepad *s = weak;
+-        if (!s || s->_menuGen != gen || !s->_padOff || s->_layout.onTV || s->_menuOpen || [s voiceOverRunning]) return;
++        if (!s || s->_menuGen != gen || s->_layout.onTV || s->_menuOpen || [s voiceOverRunning]) return;
++        // A controller's gear goes away; the touch layouts keep a dim gear so the menu stays reachable.
++        CGFloat idle = s->_padOff ? 0 : 0.3;
+         if ([s reduceMotionEnabled]) {
+-            s->_menu.alpha = 0; s->_menu.hidden = YES;
+-            [s hidePadHintNow];
++            s->_menu.alpha = idle;
++            if (s->_padOff) { s->_menu.hidden = YES; [s hidePadHintNow]; }
+             return;
+         }
+         [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+-            s->_menu.alpha = 0;
++            s->_menu.alpha = idle;
+             if (!s->_padHint.hidden) s->_padHint.alpha = 0;
+         } completion:^(BOOL finished) {
+             if (finished && s->_menuGen == gen && s->_padOff && !s->_layout.onTV && !s->_menuOpen && ![s voiceOverRunning]) {
+@@ -996,10 +1069,12 @@ int front_ctrl_support(int min, int max) {
+ UIView *dm_gamepad_view(CGRect frame) { DmGamepad *v = [[DmGamepad alloc] initWithFrame:frame]; g_view = v; return v; }
+ int dm_gamepad_controller_connected(void) { return g_view && [g_view controllerConnected] ? 1 : 0; }
+ void dm_gamepad_arrange(UIView *view, DmLayout layout) { [(DmGamepad *)view arrange:layout]; }
+-void dm_gamepad_opmode_changed(void) { [g_view opmodeChanged]; }
+ void dm_gamepad_touch_feedback(bool on) { [g_view setTouchFeedback:on]; }
+ int dm_pad_layout(void) { return g_view ? [g_view padLayout] : 0; }
+-bool dm_pad_layout_offered(int layout) { return layout == 0 || layout == 1 || (layout == 2 && dm_opmode() == 0); }
++bool dm_pad_layout_offered(int layout) {   // 0/1/2 are valid values; the menu only lists 3D and Tap, and Tap not on a TV
++    if (layout < 0 || layout > 2) return false;
++    return layout != 2 || !g_view || [(DmGamepad *)g_view tapOffered];
++}
+ void dm_pad_layout_set(int layout) { [g_view setPadLayout:layout]; }
+ void dm_gamepad_pads_read(void) {   // front_ios.m: the quit prompt closed, the game reads every controller as it is now (a button held through it counts again)
+     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) read_pad(c.extendedGamepad); }
+diff --git a/dm/ios/Sources/DmLayout.h b/dm/ios/Sources/DmLayout.h
+index 269a7823..6f416c57 100644
+--- a/dm/ios/Sources/DmLayout.h
++++ b/dm/ios/Sources/DmLayout.h
+@@ -11,12 +11,15 @@ NS_ASSUME_NONNULL_BEGIN
+ // screen keeps the same one rectangle for both. DmGamepad.m owns the band's hit testing: a touch on a key goes to the pad, one off the keys to the panel.
+ typedef struct { CGRect game, companion, controls; BOOL separated, topSafeOnly, customControlsFullBounds, onTV; } DmLayout;
+ 
++// The iPhone Duo and iPad paths are retired: only ordinary iPhones (iPhone 17, iPhone 16 Pro Max) run here.
+ static inline BOOL dm_layout_custom_controls_full_bounds(CGRect bounds, BOOL hingeClosed) {
+-    return hingeClosed && bounds.size.width > bounds.size.height;
++    (void)bounds; (void)hingeClosed;
++    return NO;
+ }
+ 
+ static inline UIEdgeInsets dm_game_safe_insets(CGRect bounds, UIEdgeInsets insets, BOOL duo) {
+-    return duo && bounds.size.height > bounds.size.width ? UIEdgeInsetsMake(insets.top, 0, 0, 0) : insets;
++    (void)bounds; (void)duo;
++    return insets;
+ }
+ 
+ // The picture's width / height before the game's first present (front.h front_picture_shape gives the real one: a taller shape under DM_SCREEN_ASPECT, 1920x1344)
+@@ -57,16 +60,10 @@ static inline float dm_picture_shape_auto(CGSize window, CGFloat topInset) {
+     return r >= 0.9 && r < 2.4 ? (float)r : 0.0f;
+ }
+ 
++// The iPhone Duo's fold is retired: an ordinary iPhone splits with no division region.
+ static inline CGRect dm_horizontal_division(CGRect b, CGRect division) {
+-    if (CGRectIsNull(division) || division.size.width <= division.size.height) return CGRectNull;
+-    // Preserve zero-height inactive folds and clip regions during display handoff.
+-    CGFloat x = MAX(CGRectGetMinX(b), CGRectGetMinX(division));
+-    CGFloat y = MAX(CGRectGetMinY(b), CGRectGetMinY(division));
+-    CGFloat right = MIN(CGRectGetMaxX(b), CGRectGetMaxX(division));
+-    CGFloat bottom = MIN(CGRectGetMaxY(b), CGRectGetMaxY(division));
+-    if (right - x < b.size.width * 0.9 || bottom < y ||
+-        y <= CGRectGetMinY(b) || bottom >= CGRectGetMaxY(b)) return CGRectNull;
+-    return CGRectMake(x, y, right - x, bottom - y);
++    (void)b; (void)division;
++    return CGRectNull;
+ }
+ 
+ static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOpen, CGRect division, CGFloat aspect) {
+@@ -78,7 +75,7 @@ static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOp
+     // A phone standing up with no fold splits the screen at its midpoint: the picture takes the upper half, the panel the lower half. The guest's
+     // picture keeps its own shape (16:9), which does not fit that half, so the picture is cropped to fill it (dm_aspect_fill): the sides are cut, never
+     // stretched. A fold sets both edges within the safe area.
+-    BOOL folded = !CGRectIsNull(division);
++    BOOL folded = NO;   // the iPhone Duo's fold is retired: a split is the phone standing up, with no fold
+     CGRect safe = UIEdgeInsetsInsetRect(b, insets);
+     CGFloat upperBottom = folded ? CGRectGetMinY(division) : CGRectGetMidY(b);
+     CGFloat bandTop = folded ? CGRectGetMaxY(division) : upperBottom;
+@@ -114,7 +111,6 @@ static inline CGPoint dm_game_touch_point(CGRect game, CGPoint p) {
+ UIView *dm_gamepad_view(CGRect frame);
+ void dm_gamepad_arrange(UIView *view, DmLayout layout);
+ void dm_gamepad_reset(void);
+-void dm_gamepad_opmode_changed(void);   // the console mode changed (the in-game menu, a TV): the Tap layout exists only in handheld mode
+ int dm_gamepad_controller_connected(void);   // a physical controller is in use: the touch gamepad is off (DmGamepad.m padsChanged)
+ 
+ NS_ASSUME_NONNULL_END
+diff --git a/dm/ios/Sources/DmPadGeometry.h b/dm/ios/Sources/DmPadGeometry.h
+index 538c8613..73928647 100644
+--- a/dm/ios/Sources/DmPadGeometry.h
++++ b/dm/ios/Sources/DmPadGeometry.h
+@@ -53,7 +53,8 @@ typedef struct {
+ } DmPadGeo;
+ 
+ // Layout constants (in u), the values DmGamepad.m has always used.
+-#define DM_PAD_SPLIT_SCALE 1.25   // the split's portrait pad is a quarter larger than the overlay's: a standing phone's band is a third of the screen
++#define DM_PAD_SPLIT_SCALE 1.25   // the split's portrait keys, D-pad and shoulders are the overlay's a quarter larger: a standing phone's band is a third of the screen
++#define DM_PAD_SPLIT_KEY_SCALE 0.9   // the split's ABXY and D-pad at nine tenths of what the rows allow: the band's space is for the thumb, not for the art
+ static const CGFloat
+     DM_PAD_ZL_X = 44, DM_PAD_ZL_Y = 40, DM_PAD_ZL_R = 26,     // ZL / ZR: centre from the outer edge and the top, radius
+     DM_PAD_L_X = 44, DM_PAD_L_Y = 108, DM_PAD_L_R = 24,       // L / R: same column as ZL / ZR
+@@ -64,9 +65,9 @@ static const CGFloat
+     DM_PAD_PILL_DX = 52, DM_PAD_PILL_Y = 22, DM_PAD_PILL_W = 50, DM_PAD_PILL_H = 28,   // − / +: centre from the midline and from the top, size
+     DM_PAD_SWAP_R = 15,                                       // menu button: top centre, level with − / +
+     DM_PAD_STICK_X = 81, DM_PAD_STICK_R = 77, DM_PAD_KNOB_R = 30,   // left stick: mirrors the diamond
+-    DM_PAD_LOW_X = 231, DM_PAD_LOW_Y = 64,                    // D-pad centre from the outer edge and the bottom
+-    DM_PAD_DPAD_R = 48, DM_PAD_ARM_W = 17, DM_PAD_ARM_IN = 11,   // D-pad (the overlay layout): its arms reach 48 u from the centre
+-    DM_PAD_SPLIT_REACH = 83.75, DM_PAD_ARM_W_SPLIT = 27, DM_PAD_ARM_IN_SPLIT = 18,   // D-pad (the split): its tip reaches the diamond's key outer edge (50 + 27 x 1.25), so the two read as one size
++    DM_PAD_LOW_X = 255, DM_PAD_LOW_Y = 69,                    // D-pad centre from the outer edge and the bottom (level with the stick and diamond's lower edge)
++    DM_PAD_DPAD_R = 60, DM_PAD_ARM_W = 21.25, DM_PAD_ARM_IN = 13.75,   // D-pad: its arms reach 60 u from the centre, a quarter more than the 48 u it had
++    DM_PAD_SPLIT_REACH_2D = 83.75, DM_PAD_ARM_W_2D = 27, DM_PAD_ARM_IN_2D = 18,   // the split's 2D pad keeps the size it had before the 3D proportions
+     DM_PAD_CLICK_X = 102, DM_PAD_CLICK_R = 17;                // L3 / R3: centre from the outer edge, on the line between ZL / ZR and L / R, radius
+ 
+ // DM_TOUCH_SIZE: small, medium (also unset, empty or unknown) or large.
+@@ -134,16 +135,26 @@ static inline DmPadGeo dm_pad_geo_at(CGRect bounds, UIEdgeInsets insets, DmLayou
+         g.face = CGPointMake(xr, yTop);
+         g.dpad = CGPointMake(xl, yLow);
+         g.rstick = CGPointMake(xr, yLow); g.rstickDrawn = YES;
+-        // A standing phone's band is a third of the screen, so its keys are drawn a quarter larger. The stick's ring and the D-pad's reach keep their
+-        // size: they are as big as the layout allows, and the keys around them grow instead.
++        // A standing phone's band is a third of the screen, so the shoulders are drawn a quarter larger than the overlay's. In 3D the keys and the
++        // D-pad are nine tenths of what the rows would allow, keeping the overlay's proportions between them: the band's space is for the thumb.
++        // 2D keeps the geometry it had before (the 2D layout is no longer offered, but a saved choice still draws it): its keys stay where they were
++        // and its D-pad keeps its old split size.
+         g.faceR *= DM_PAD_SPLIT_SCALE; g.knobR *= DM_PAD_SPLIT_SCALE;
+-        // The hit circle grows with the artwork, but it still stops short of a neighbour's centre: the keys are 50 u apart, so a circle of 0.75 of
+-        // that reaches the midpoint between two of them (both count there) and no further.
++        if (full) { g.faceGap *= DM_PAD_SPLIT_SCALE * DM_PAD_SPLIT_KEY_SCALE; g.faceR *= DM_PAD_SPLIT_KEY_SCALE; }
++        // The hit circle grows with the artwork, but it still stops short of a neighbour's centre: in 3D the keys are 56.25 u apart, so a circle
++        // of 0.75 of that reaches the midpoint between two of them (both count there) and no further.
+         g.faceHitR = MIN(MAX(g.faceR * 1.25, g.faceGap * 0.75), 1.2 * g.faceGap);
+         for (int i = 0; i < 4; i++) g.dropR[i] *= DM_PAD_SPLIT_SCALE;
+         g.clickR *= DM_PAD_SPLIT_SCALE;
+-        // The D-pad in a split reaches as far as the ABXY diamond's keys, so the two read as one size.
+-        g.dpadR = DM_PAD_SPLIT_REACH * u; g.armW = DM_PAD_ARM_W_SPLIT * u; g.armIn = DM_PAD_ARM_IN_SPLIT * u;
++        if (full) {   // the 3D D-pad keeps the overlay's proportions: its reach and arms grow by the same quarter as the keys, at their smaller size
++            g.dpadR = DM_PAD_DPAD_R * DM_PAD_SPLIT_SCALE * DM_PAD_SPLIT_KEY_SCALE * u;
++            g.armW = DM_PAD_ARM_W * DM_PAD_SPLIT_SCALE * DM_PAD_SPLIT_KEY_SCALE * u;
++            g.armIn = DM_PAD_ARM_IN * DM_PAD_SPLIT_SCALE * DM_PAD_SPLIT_KEY_SCALE * u;
++        } else {
++            g.dpadR = DM_PAD_SPLIT_REACH_2D * u;
++            g.armW = DM_PAD_ARM_W_2D * u;
++            g.armIn = DM_PAD_ARM_IN_2D * u;
++        }
+         // The unit is derived from the gap between the rows (dm_pad_base_unit), so the two rows already fit: nothing is clamped here.
+         g.stickR = DM_PAD_STICK_R * u; g.rstickR = g.stickR;
+     } else {
+@@ -228,7 +239,7 @@ static inline BOOL dm_pad_geo_fits(const DmPadGeo *g, BOOL full) {
+ }
+ 
+ // The unit of the built-in size: the screen height (inside the controls region when it is split off), up to 1.3.
+-static inline CGFloat dm_pad_base_unit(CGRect bounds, UIEdgeInsets insets, DmLayout layout) {
++static inline CGFloat dm_pad_base_unit(CGRect bounds, UIEdgeInsets insets, DmLayout layout, BOOL full) {
+     if (!layout.separated) return MIN(bounds.size.height / 430.0, 1.3);
+     CGRect s = CGRectIntersection(layout.controls, UIEdgeInsetsInsetRect(bounds, dm_game_safe_insets(bounds, insets, layout.topSafeOnly)));
+     // A standing phone's band is tall and narrow: its two columns run down the band, so the band sets the size and its width only keeps the
+@@ -236,12 +247,23 @@ static inline CGFloat dm_pad_base_unit(CGRect bounds, UIEdgeInsets insets, DmLay
+     if (bounds.size.height > bounds.size.width) {
+         CGRect band = s;   // the safe part of the band: the rows are measured within it (the anchors)
+         CGFloat rows = dm_pad_portrait_row_gap(band);
+-        // The two rows share the band: the stick's ring reaches down and the D-pad reaches up, so the row's height takes the gap between them.
+-        CGFloat span = DM_PAD_STICK_R + hypot(DM_PAD_SPLIT_REACH, DM_PAD_ARM_W_SPLIT);
++        // The two rows share the band: the diamond's lower key reaches down from the upper row, and the lower row reaches up with whichever of
++        // the D-pad's drawn circle and the stick's ring is the larger, so the gap between the rows takes both reaches. 2D keeps its own, older
++        // geometry: its keys sit 50 u apart and its D-pad reaches 83.75 u.
++        CGFloat span, columns;
++        if (full) {
++            CGFloat reach = DM_PAD_SPLIT_SCALE * (DM_PAD_FACE_GAP + DM_PAD_FACE_R);
++            CGFloat low = MAX(DM_PAD_STICK_R, DM_PAD_SPLIT_SCALE * hypot(DM_PAD_DPAD_R, DM_PAD_ARM_W));
++            span = reach + low;
++            columns = span;
++        } else {
++            span = DM_PAD_STICK_R + hypot(DM_PAD_SPLIT_REACH_2D, DM_PAD_ARM_W_2D);
++            columns = DM_PAD_STICK_R + DM_PAD_SPLIT_REACH_2D;
++        }
+         CGFloat byRows = (rows - 8) / span;
+         // The band's height, as the general size of the screen, and its width, which only has to keep the two columns apart.
+         CGFloat byHeight = MIN(band.size.height / 430.0, 1.3);
+-        CGFloat byWidth = band.size.width * 0.5 / (DM_PAD_STICK_R + DM_PAD_SPLIT_REACH);
++        CGFloat byWidth = band.size.width * 0.5 / columns;
+         return MIN(MIN(byRows, byHeight), MIN(byWidth, 1.3));
+     }
+     return MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3);
+@@ -251,7 +273,7 @@ static inline CGFloat dm_pad_base_unit(CGRect bounds, UIEdgeInsets insets, DmLay
+ // that does not fit gets smaller; a small one in a split region whose minimum edges crowd it gets larger), and the left stick's place.
+ // The built-in size is never changed.
+ static inline DmPadGeo dm_pad_geo_placed(CGRect bounds, UIEdgeInsets insets, DmLayout layout, BOOL full, DmPadOptions o) {
+-    CGFloat u0 = dm_pad_base_unit(bounds, insets, layout), scale = o.scale > 0 ? o.scale : 1;
++    CGFloat u0 = dm_pad_base_unit(bounds, insets, layout, full), scale = o.scale > 0 ? o.scale : 1;
+     DmPadGeo g = dm_pad_geo_at(bounds, insets, layout, full, u0 * scale);
+     while (scale != 1 && !dm_pad_geo_fits(&g, full)) {
+         scale = scale > 1 ? fmax(1, scale - 0.05) : fmin(1, scale + 0.05);
+diff --git a/dm/ios/Sources/GameMenu.swift b/dm/ios/Sources/GameMenu.swift
+index 81224df3..d08a8889 100644
+--- a/dm/ios/Sources/GameMenu.swift
++++ b/dm/ios/Sources/GameMenu.swift
+@@ -36,9 +36,9 @@ public func dmGameMenu() -> UnsafeMutableRawPointer {
+ }
+ 
+ private func gameMenuItems() -> [UIMenuElement] {
+-    let names = ["2D", "3D", "Tap"]
+-    let layouts = (0..<3).filter { dm_pad_layout_offered(Int32($0)) }.map { l in
+-        UIAction(title: names[l], state: dm_pad_layout() == l ? .on : .off) { _ in dm_pad_layout_set(Int32(l)) }
++    let names = [1: "3D", 2: "Tap"]
++    let layouts = [1, 2].filter { dm_pad_layout_offered(Int32($0)) }.map { l in
++        UIAction(title: names[l]!, state: dm_pad_layout() == l ? .on : .off) { _ in dm_pad_layout_set(Int32(l)) }
+     }
+     let layout = UIMenu(title: GameMenuText.controllerLayout.text, options: .singleSelection, children: layouts)   // a choice's value shows in its submenu: a subtitle would make each row two lines
+     var items: [UIMenuElement] = []
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index 6c16d302..27c45072 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -136,6 +136,7 @@ static void launcher_done(void) { [g_root startGame]; }
+ - (void)viewDidLoad {
+     [super viewDidLoad];
+     self.view.backgroundColor = UIColor.blackColor;
++#if 0   // the iPhone Duo's hinge is retired: only ordinary iPhones run here
+ #if __has_include(<UIKit/UIHingeInteraction.h>)
+     if (@available(iOS 27.1, *)) {
+         __weak DmRootVC *weakSelf = self;
+@@ -144,6 +145,7 @@ static void launcher_done(void) { [g_root startGame]; }
+         }]];
+     }
+ #endif
++#endif
+ #if DM_COMPANION
+     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appStateChanged:) name:UIApplicationWillResignActiveNotification object:nil];
+     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appStateChanged:) name:UIApplicationDidBecomeActiveNotification object:nil];
+@@ -261,8 +263,9 @@ static UIWindow *g_tv;   // the TV scene's window while one shows the picture (t
+ - (void)viewDidLayoutSubviews {
+     [super viewDidLayoutSubviews];
+     CGRect b = self.view.bounds; if (!self.game) return;
+-    CGRect division = CGRectNull;   // an iPhone Duo's fold, as UIKit reports it (iOS 27.1)
++    CGRect division = CGRectNull;   // the iPhone Duo's fold is retired: ordinary iPhones report none
+     NSMutableArray<NSString *> *regionLog = [NSMutableArray array];
++#if 0   // the iPhone Duo's division regions are retired
+ #if __has_include(<UIKit/UIHingeInteraction.h>)
+     if (@available(iOS 27.1, *)) {
+         for (UIViewReservedRegion *region in [self.view reservedRegionsOfKind:UIViewReservedRegionKind.divisionRegionKind options:UIViewReservedRegionQueryOptionsIncludeInactive]) {
+@@ -272,7 +275,8 @@ static UIWindow *g_tv;   // the TV scene's window while one shows the picture (t
+         }
+     }
+ #endif
+-    BOOL duoPortrait = b.size.height > b.size.width && (self.hingeStatus != 0 || !CGRectIsNull(division));
++#endif
++    BOOL duoPortrait = NO;   // the iPhone Duo is retired
+     UIEdgeInsets gameInsets = dm_game_safe_insets(b, self.view.safeAreaInsets, duoPortrait);
+     BOOL onTV = self.game.superview != self.view;   // the TV's view lays the picture out; the phone is all pad
+     DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect), b, self.fill, g_picture_aspect);
+@@ -280,9 +284,11 @@ static UIWindow *g_tv;   // the TV scene's window while one shows the picture (t
+     self.companion.frame = layout.companion;
+     self.companion.hidden = !layout.separated;
+     layout.topSafeOnly = duoPortrait;
+-    BOOL hingeClosed = NO;
++    BOOL hingeClosed = NO;   // the iPhone Duo's hinge is retired
++#if 0
+ #if __has_include(<UIKit/UIHingeInteraction.h>)
+     if (@available(iOS 27.1, *)) hingeClosed = self.hingeStatus == UIHingeStatusClosed;
++#endif
+ #endif
+     layout.customControlsFullBounds = dm_layout_custom_controls_full_bounds(b, hingeClosed);
+ #if DM_COMPANION
+@@ -309,7 +315,7 @@ static UIWindow *g_tv;   // the TV scene's window while one shows the picture (t
+         // The frame-rate counter: in the top row's free stretch (right of DmGamepad.m's L3 key, 102 + 17 of its units from the safe edge, level with − / +)
+         // in the overlay layout; under the menu gear in a split, where the top row is crowded. u is the gamepad's unit.
+         CGRect s = CGRectIntersection(layout.controls, UIEdgeInsetsInsetRect(b, gameInsets));
+-        CGFloat u = dm_pad_base_unit(b, gameInsets, layout);   // the gamepad's own unit (DmPadGeometry.h), so the counter lines up with the gear
++        CGFloat u = dm_pad_base_unit(b, gameInsets, layout, dm_pad_layout() != 0);   // the gamepad's own unit (DmPadGeometry.h), so the counter lines up with the gear
+         if (layout.separated) {
+             CGFloat gear = 15 * u;   // the menu gear's radius (DmGamepad.m DM_PAD_SWAP_R), at the top centre
+             self.fps.frame = CGRectMake(floor(CGRectGetMidX(s) - 32), floor(CGRectGetMinY(s) + gear * 2 + 12), 64, 22);
+@@ -359,13 +365,13 @@ static void tv_attach(void) {
+     [g_tv.rootViewController.view addSubview:v]; [g_tv.rootViewController.view setNeedsLayout]; [g_root.view setNeedsLayout];   // the phone's pad takes the whole screen
+     CGRect f = dm_aspect_fit(g_tv.bounds, g_picture_aspect); CGFloat scale = MIN(g_tv.windowScene.screen.nativeScale, 1920.0 / MAX(f.size.width, 1));
+     if (g_tv_mode_was < 0) g_tv_mode_was = dm_opmode();
+-    dm_set_opmode(1); dm_gamepad_opmode_changed();
++    dm_set_opmode(1);
+     LOG("front end: TV connected (%.0fx%.0f points), the picture moves there at %.0fx%.0f, console mode", g_tv.bounds.size.width, g_tv.bounds.size.height, f.size.width * scale, f.size.height * scale);
+ }
+ static void tv_detach(void) {
+     DmGameView *v = g_root.game; g_tv = nil; v.maxPixelWidth = 0;
+     if (v && v.superview != g_root.view) { [g_root.view insertSubview:v atIndex:0]; [g_root.view setNeedsLayout]; }
+-    if (g_tv_mode_was >= 0) { dm_set_opmode(g_tv_mode_was); g_tv_mode_was = -1; dm_gamepad_opmode_changed(); }
++    if (g_tv_mode_was >= 0) { dm_set_opmode(g_tv_mode_was); g_tv_mode_was = -1; }
+     LOG("front end: TV disconnected, the picture is back on the phone");
+ }
+ void front_picture_shape(int w, int h) {   // front.h: the views take the presented picture's shape (a taller one under DM_SCREEN_ASPECT) instead of 16:9
+@@ -391,7 +397,7 @@ bool dm_setting_live(const char *env, const char *value) {
+         if (!value) return true;
+         int m = atoi(value) ? 1 : 0;
+         if (g_tv_mode_was >= 0) { g_tv_mode_was = m; LOG("front end: console mode %s once the TV is unplugged (in-game menu)", m ? "docked" : "handheld"); return true; }
+-        dm_set_opmode(m); dm_gamepad_opmode_changed(); LOG("front end: console mode %s (in-game menu)", m ? "docked" : "handheld");
++        dm_set_opmode(m); LOG("front end: console mode %s (in-game menu)", m ? "docked" : "handheld");
+         return true;
+     }
+     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
+diff --git a/dm/ios/tests/pad_geometry/pad_geometry_check.m b/dm/ios/tests/pad_geometry/pad_geometry_check.m
+index 9f23d61f..69de3274 100644
+--- a/dm/ios/tests/pad_geometry/pad_geometry_check.m
++++ b/dm/ios/tests/pad_geometry/pad_geometry_check.m
+@@ -283,21 +283,78 @@ int main(void) {
+         if (!NEAR(g.u, 1)) FAIL("Pro Max: u %.3f, want 1", g.u);
+         if (!NEAR(g.face.x, 932 - 29.5 - 81) || !NEAR(g.face.y, 430 - 21 - 82)) FAIL("Pro Max: diamond at %.1f %.1f", g.face.x, g.face.y);
+         if (!NEAR(g.stick.x, 29.5 + 81) || !NEAR(g.stick.y, 430 - 21 - 82)) FAIL("Pro Max: stick at %.1f %.1f", g.stick.x, g.stick.y);
+-        if (!NEAR(g.dpad.x, 29.5 + 231) || !NEAR(g.dpad.y, 430 - 21 - 64)) FAIL("Pro Max: D-pad at %.1f %.1f", g.dpad.x, g.dpad.y);
++        if (!NEAR(g.dpad.x, 29.5 + 255) || !NEAR(g.dpad.y, 430 - 21 - 69)) FAIL("Pro Max: D-pad at %.1f %.1f", g.dpad.x, g.dpad.y);
+         if (!NEAR(g.drop[DM_PAD_ZL].x, 59 + 44) || !NEAR(g.drop[DM_PAD_ZL].y, 40) || !NEAR(g.drop[DM_PAD_R].x, 932 - 59 - 44) || !NEAR(g.drop[DM_PAD_R].y, 108)) FAIL("Pro Max: shoulders moved");
+         if (!NEAR(g.click[1].x, 932 - 59 - 102) || !NEAR(g.pill[DM_PAD_PLUS].origin.x, 466 + 52 - 25) || !NEAR(g.swap.x, 466) || !NEAR(g.swap.y, 22)) FAIL("Pro Max: top row moved");
+-        if (!NEAR(g.stickR, 77) || !NEAR(g.faceR, 27) || !NEAR(g.dpadR, 48)) FAIL("Pro Max: sizes changed");
++        if (!NEAR(g.stickR, 77) || !NEAR(g.faceR, 27) || !NEAR(g.dpadR, 60)) FAIL("Pro Max: sizes changed");
+         // Portrait split (the Duo harness's numbers): the two columns at 25 % and 75 % of the band, the two rows at 50 % and 80 % of it.
+         DmLayout l = dm_layout(screens[9].bounds, screens[9].insets, NO, CGRectNull, DM_PICTURE_16_9);
+-        DmPadGeo p = dm_pad_geo(screens[9].bounds, screens[9].insets, l, NO, (DmPadOptions){1});
++        DmPadGeo p = dm_pad_geo(screens[9].bounds, screens[9].insets, l, YES, (DmPadOptions){1});
+         CGRect band = p.safe;   // the anchors are shares of the band's safe part
+         if (!p.portrait || !NEAR(p.face.x, CGRectGetMinX(band) + 0.75 * band.size.width) || !NEAR(p.stick.x, CGRectGetMinX(band) + 0.25 * band.size.width)
+             || !NEAR(p.stick.y, CGRectGetMinY(band) + 0.50 * band.size.height) || !NEAR(p.face.y, CGRectGetMinY(band) + 0.50 * band.size.height)
+             || !NEAR(p.dpad.x, CGRectGetMinX(band) + 0.25 * band.size.width) || !NEAR(p.dpad.y, CGRectGetMinY(band) + 0.80 * band.size.height)
+             || !NEAR(p.rstick.x, CGRectGetMinX(band) + 0.75 * band.size.width) || !NEAR(p.rstick.y, CGRectGetMinY(band) + 0.80 * band.size.height))
+             FAIL("portrait: the two columns at 25 %% and 75 %%, the two rows at 50 %% and 80 %%");
+-        // The D-pad's reach in a split is the diamond's key outer edge (the key's distance from the centre plus its radius).
+-        if (!NEAR(p.dpadR, 50 * p.u + 27 * p.u * 1.25)) FAIL("portrait: the D-pad reaches %.1f, the diamond's edge is %.1f", p.dpadR, 50 * p.u + 27 * p.u * 1.25);
++        // The split's D-pad, keys and the keys' distance from the diamond's centre carry the overlay's proportions: all three grow by the
++        // same quarter, so the two layouts read at one size.
++        if (!NEAR(p.dpadR, DM_PAD_DPAD_R * DM_PAD_SPLIT_SCALE * DM_PAD_SPLIT_KEY_SCALE * p.u)) FAIL("portrait: the D-pad reaches %.1f, %.1f is the overlay's quarter larger at nine tenths", p.dpadR, DM_PAD_DPAD_R * DM_PAD_SPLIT_SCALE * DM_PAD_SPLIT_KEY_SCALE * p.u);
++        if (!NEAR(p.faceGap, DM_PAD_FACE_GAP * DM_PAD_SPLIT_SCALE * DM_PAD_SPLIT_KEY_SCALE * p.u)) FAIL("portrait: the keys sit %.1f from the centre, %.1f is the overlay's quarter larger at nine tenths", p.faceGap, DM_PAD_FACE_GAP * DM_PAD_SPLIT_SCALE * DM_PAD_SPLIT_KEY_SCALE * p.u);
++        if (!NEAR(p.dpadR / p.faceR, DM_PAD_DPAD_R / DM_PAD_FACE_R) || !NEAR(p.faceGap / p.faceR, DM_PAD_FACE_GAP / DM_PAD_FACE_R))
++            FAIL("portrait: the pad's proportions are not the overlay's (D-pad %.3f of a key, keys %.3f apart; the overlay's %.3f and %.3f)",
++                 p.dpadR / p.faceR, p.faceGap / p.faceR, DM_PAD_DPAD_R / DM_PAD_FACE_R, DM_PAD_FACE_GAP / DM_PAD_FACE_R);
++    }
++
++    // Every 3D portrait split keeps the overlay's proportions, on every device: the D-pad's reach and the diamond's spread are fixed fractions
++    // of a key's radius, so the two layouts stay related however the band sizes the pad.
++    for (int i = 0; i < nscreens; i++) {
++        DmLayout l = dm_layout(screens[i].bounds, screens[i].insets, screens[i].partiallyOpen, screens[i].division, DM_PICTURE_16_9);
++        if (!l.separated || screens[i].bounds.size.height <= screens[i].bounds.size.width) continue;
++        DmPadGeo g = dm_pad_geo(screens[i].bounds, screens[i].insets, l, YES, (DmPadOptions){1});
++        if (!NEAR(g.dpadR / g.faceR, DM_PAD_DPAD_R / DM_PAD_FACE_R)) FAIL("%s: the D-pad is %.3f of a key, the overlay's is %.3f", screens[i].name, g.dpadR / g.faceR, DM_PAD_DPAD_R / DM_PAD_FACE_R);
++        if (!NEAR(g.faceGap / g.faceR, DM_PAD_FACE_GAP / DM_PAD_FACE_R)) FAIL("%s: the keys are %.3f apart, the overlay's are %.3f", screens[i].name, g.faceGap / g.faceR, DM_PAD_FACE_GAP / DM_PAD_FACE_R);
++    }
++
++    // 2D keeps the split geometry it had before the 3D proportions: its keys stay 50 u apart, its D-pad reaches 83.75 u, and the unit is
++    // the old row span's. The 2D layout is no longer offered, but a saved choice still draws exactly what it drew.
++    for (int i = 0; i < nscreens; i++) {
++        DmLayout l = dm_layout(screens[i].bounds, screens[i].insets, screens[i].partiallyOpen, screens[i].division, DM_PICTURE_16_9);
++        if (!l.separated || screens[i].bounds.size.height <= screens[i].bounds.size.width) continue;
++        DmPadGeo g = dm_pad_geo(screens[i].bounds, screens[i].insets, l, NO, (DmPadOptions){1});
++        if (!NEAR(g.faceGap, DM_PAD_FACE_GAP * g.u)) FAIL("%s 2D: the keys sit %.1f from the centre, %.1f is the old 50 u", screens[i].name, g.faceGap, DM_PAD_FACE_GAP * g.u);
++        if (!NEAR(g.dpadR, DM_PAD_SPLIT_REACH_2D * g.u)) FAIL("%s 2D: the D-pad reaches %.1f, %.1f is the old 83.75 u", screens[i].name, g.dpadR, DM_PAD_SPLIT_REACH_2D * g.u);
++        CGFloat rows = dm_pad_portrait_row_gap(g.safe);
++        CGFloat span = DM_PAD_STICK_R + hypot(DM_PAD_SPLIT_REACH_2D, DM_PAD_ARM_W_2D);
++        CGFloat expect = MIN(MIN((rows - 8) / span, MIN(g.safe.size.height / 430.0, 1.3)),
++                             MIN(g.safe.size.width * 0.5 / (DM_PAD_STICK_R + DM_PAD_SPLIT_REACH_2D), 1.3));
++        if (!NEAR(g.u, expect)) FAIL("%s 2D: u %.3f, the old row span gives %.3f", screens[i].name, g.u, expect);
++    }
++
++    // A face key's hit circle never reaches a neighbour's centre (that one alone counts). The keys sit on a diamond: two neighbours are
++    // faceGap * sqrt(2) apart. In a split the circle also reaches the midpoint between two of them, so both count there; in the overlay it
++    // does not, as it always has not.
++    for (int i = 0; i < nscreens; i++) {
++        DmLayout l = dm_layout(screens[i].bounds, screens[i].insets, screens[i].partiallyOpen, screens[i].division, DM_PICTURE_16_9);
++        DmPadGeo g = dm_pad_geo(screens[i].bounds, screens[i].insets, l, YES, (DmPadOptions){1});
++        CGFloat apart = g.faceGap * sqrt(2.0);
++        if (g.faceHitR >= apart) FAIL("%s: the hit circle %.1f reaches a neighbour's centre %.1f apart", screens[i].name, g.faceHitR, apart);
++        if (l.separated && g.faceHitR < apart / 2) FAIL("%s: the hit circle %.1f stops short of the midpoint %.1f, two keys cannot count together", screens[i].name, g.faceHitR, apart / 2);
++    }
++
++    // Every locked key (the shoulders, - / + and the stick clicks) has a place of its own on every screen: a point where it is the nearest
++    // of them and so takes the touch. Their hit circles are a third bigger than the drawn keys, so they can reach over each other; each one
++    // must still keep a region of its own.
++    for (int i = 0; i < nscreens; i++) {
++        DmLayout l = dm_layout(screens[i].bounds, screens[i].insets, screens[i].partiallyOpen, screens[i].division, DM_PICTURE_16_9);
++        DmPadGeo g = dm_pad_geo(screens[i].bounds, screens[i].insets, l, YES, (DmPadOptions){1});
++        for (int k = 0; k < 8; k++) {
++            int c = dm_pad_locked[k];
++            int found = 0;
++            for (int x = 0; x < (int)screens[i].bounds.size.width && !found; x += 3)
++                for (int y = 0; y < (int)screens[i].bounds.size.height && !found; y += 3)
++                    if (dm_pad_locked_at(&g, YES, l.separated, CGPointMake(x, y), NULL) == c) found = 1;
++            if (!found) FAIL("%s: the locked key %s has no place of its own", screens[i].name, dm_pad_control_names[c]);
++        }
+     }
+ 
+     // Every size and stick place on every screen, 2D and 3D: inside, and no overlap.

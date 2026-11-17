@@ -1115,6 +1115,7 @@
   "ios.host.missingExternalShaders": "このゲームのデータフォルダにシェーダーファイル（msl）がありません。NX2Apple からゲームデータをもう一度送信またはコピーしてください。",
   "ios.host.missingKey": "%@ に \"%@\" がありません。",
   "ios.host.missingKeyIn": "%@ に \"%@\" がありません（%@ 内）。",
+  "ios.host.navHint": "バーを3回タップでタッチに切替",
   "ios.host.noAdditional": "追加コンテンツなし",
   "ios.host.noDataInFolder": "そのフォルダに %@ のゲームデータが見つかりませんでした。",
   "ios.host.noLauncherJson": "このゲームには launcher.json がありません。",

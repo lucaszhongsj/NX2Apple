@@ -95,3 +95,4 @@
 0097-ios-keep-the-game-s-touches-in-the-tap-layout.patch
 0098-ios-split-below-the-dynamic-island-and-stack-the.patch
 0099-ios-skip-the-island-trim-and-spread-the-portrait.patch
+0100-ios-widen-the-portrait-pad-s-anchor-grid.patch

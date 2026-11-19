@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Wed, 18 Nov 2026 02:40:57 +0800
+Subject: [PATCH] ios: the Duo harness links and docks again
+
+Upstream-Status: pending
+Reason: front_ios.m calls dm_companion_background_state, which the harness's
+stand-in companion did not define, so the target did not link; and the pad's
+docking is the TV layout now, so the test docks with dm_layout_pad_only instead
+of calling the removed dm_gamepad_opmode_changed.
+Issue: none yet: no upstream issue for the harness
+---
+ dm/ios/tests/duo/Sources/DuoRuntimeStubs.m | 1 +
+ dm/ios/tests/duo/Tests/DuoHarnessTests.m   | 9 ++++-----
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m b/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
+index 94f25ba0..b8d11b33 100644
+--- a/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
++++ b/dm/ios/tests/duo/Sources/DuoRuntimeStubs.m
+@@ -124,6 +124,7 @@ void *dm_companion_view_controller(void) {
+ }
+ void dm_companion_ui_state(int hidden, int physical, int presented) { (void)hidden; (void)physical; (void)presented; }
+ void dm_companion_ui_dock_insets(double left, double right, double bottom) { (void)left; (void)right; (void)bottom; }
++void dm_companion_background_state(int on) { (void)on; }
+ int front_ios_boot_ok(void) { return 1; }
+ void front_ios_boot(void) {}
+ bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewController; (void)done; return false; }
+diff --git a/dm/ios/tests/duo/Tests/DuoHarnessTests.m b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+index 0fcc54d5..ee00a3b6 100644
+--- a/dm/ios/tests/duo/Tests/DuoHarnessTests.m
++++ b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+@@ -843,18 +843,17 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+ }
+ 
+ - (void)testDockingDropsTheTapLayout {
+-    dm_set_opmode(0);
+     CGRect bounds = CGRectMake(0, 0, 844, 390);
+     [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+     dm_pad_layout_set(2);
+     XCTAssertEqual(dm_pad_layout(), 2);
+-    dm_set_opmode(1); dm_gamepad_opmode_changed();
+-    XCTAssertEqual(dm_pad_layout(), 0, @"Docked, the game reads no touch screen: Tap goes");
++    // On a TV the phone shows no picture for a touch to land on (dm_layout_pad_only): Tap goes
++    [self padForLayout:dm_layout_pad_only(bounds) bounds:bounds];
++    XCTAssertEqual(dm_pad_layout(), 0, @"On a TV Tap goes");
+     XCTAssertFalse(dm_pad_layout_offered(2));
+     dm_pad_layout_set(2);
+-    XCTAssertEqual(dm_pad_layout(), 0, @"Tap cannot be picked while docked");
++    XCTAssertEqual(dm_pad_layout(), 0, @"Tap cannot be picked on a TV");
+     XCTAssertEqualObjects([NSUserDefaults.standardUserDefaults objectForKey:@"DmPadLayout"], @0);
+-    dm_set_opmode(0);
+ }
+ 
+ - (void)testInGameMenuSettingsTakeEffectAtOnce {

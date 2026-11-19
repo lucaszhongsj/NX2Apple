@@ -113,3 +113,13 @@
 0115-ios-a-3d-layout-keeps-the-band-s-wallpaper-alone.patch
 0116-ios-the-diy-page-keeps-its-own-wallpaper.patch
 0117-ios-every-page-s-wallpaper-fills-the-band-whole.patch
+0118-ios-a-standing-phone-s-picture-fills-the-upper-h.patch
+0119-ios-the-companion-s-bar-keeps-the-canvas-dock-ra.patch
+0120-ios-the-duo-harness-links-and-docks-again.patch
+0121-fix-ios-the-band-s-bar-and-the-picture-shape-che.patch
+0122-docs-acnh-the-picture-shape-s-lower-bound-is-the.patch
+0123-fix-acnh-the-taller-picture-narrows-to-stay-unde.patch
+0124-fix-acnh-the-keyboard-s-backing-stays-with-its-d.patch
+0125-fix-acnh-the-keyboard-docks-to-the-picture-s-bot.patch
+0126-fix-acnh-the-text-keyboard-and-the-language-list.patch
+0127-fix-host-a-touch-on-a-docked-interface-maps-to-t.patch

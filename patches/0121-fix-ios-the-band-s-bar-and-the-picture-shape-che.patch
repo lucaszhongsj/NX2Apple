@@ -1,0 +1,177 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Wed, 18 Nov 2026 03:22:36 +0800
+Subject: [PATCH] fix(ios): the band's bar and the picture shape, checked
+
+- companion_layout.h: the standing bar's canvas is placed by the art
+  window's own middle (1016), so the window's 952..1080 span lands on its
+  rectangle; the harness asserts both ends.
+- DmLayout.h: "auto" clamps to loader.c's 0.9..2.4 range in both
+  orientations, so a shape the loader would refuse falls back to 16:9.
+- t_touch.c: the mapping cases use points off the middle and the edges,
+  where a scale shows, and add a 16:9 case that must not map.
+- DuoHarnessTests.m: the docking case reuses one pad, so it checks the
+  arrangement's effect rather than a fresh view's default.
+- The game note and the two setting references follow the new "auto" and
+  the loader's range.
+
+Upstream-Status: pending
+Reason: the review of the three patches before it found the standing bar's canvas
+placed by 1019.5 while the art window's own middle is 1016, "auto" missing
+loader.c's 0.9 lower clamp, and two tests that pass without the code doing the
+work (a touch on an edge, a fresh pad per arrangement); this fixes all four and
+brings the game note and the two setting references along.
+Issue: none yet: no upstream issue for the companion or the picture shape
+
+---
+ dm/games/01006F8002326000/README.md      |  6 +++---
+ dm/host/companion_layout.h               |  5 +++--
+ dm/host/tests/t_touch.c                  | 15 ++++++++++-----
+ dm/ios/Sources/DmLayout.h                |  8 ++++----
+ dm/ios/tests/duo/Tests/DuoHarnessTests.m | 10 +++++++---
+ docs/settings.md                         |  2 +-
+ 6 files changed, 28 insertions(+), 18 deletions(-)
+
+diff --git a/dm/games/01006F8002326000/README.md b/dm/games/01006F8002326000/README.md
+index 74b400c3..92739bd3 100644
+--- a/dm/games/01006F8002326000/README.md
++++ b/dm/games/01006F8002326000/README.md
+@@ -61,9 +61,9 @@ Checked on a Mac (M1, macOS 27, headless, an island save) against 16:9: the 3D v
+ 
+ ## iPhone portrait (current)
+ 
+-A phone standing up shows the game's picture in the upper half of the window and the companion band in the lower half: `dm/ios/Sources/DmLayout.h` splits the window at its midpoint, and the picture is fitted into that half. *Picture shape* `auto` asks for the half's own shape (twice the window's width / its height: 0.92 on a 19.5:9 phone, 1.12 on a 375x667 one, 1.39 on an iPad), so the fitted picture fills the half exactly: its background covers the area with nothing cropped and nothing stretched. The game's own layouts keep 16:9, centred in the picture (the adapter's `SetProjectionMtx` y-row division, below), so its HUD and menus are not stretched either; the touch screen maps a touch on the taller picture back onto that centred rectangle (`ui_y` in `hle_touch.c`), so a control is hit where it is drawn. A manual `DM_SCREEN_ASPECT` that does not match the half keeps its whole picture and leaves bars instead of cropping it. The picture never takes more than half the window, so the band keeps the other half; a fold sets both edges itself.
++A phone standing up shows the game's picture in the upper half of the window and the companion band in the lower half: `dm/ios/Sources/DmLayout.h` splits the window at its midpoint, and the picture is fitted into that half. *Picture shape* `auto` asks for the half's own shape (twice the screen's width / its height: 0.92 on a 19.5:9 phone, 1.12 on a 375x667 one, 1.39 on an iPad; an iPhone shows the game full screen, so the screen and the window agree), so the fitted picture fills the half exactly: its background covers the area with nothing cropped and nothing stretched. The game's own layouts keep 16:9, centred in the picture (the adapter's `SetProjectionMtx` y-row division, below), so its HUD and menus are not stretched either; the touch screen maps a touch on the taller picture back onto that centred rectangle (`ui_y` in `hle_touch.c`), so a control is hit where it is drawn. A manual `DM_SCREEN_ASPECT` that does not match the half keeps its whole picture and leaves bars instead of cropping it. The picture never takes more than half the window, so the band keeps the other half.
+ 
+-**`auto` is resolved once, at the game's start**, because `DM_SCREEN_ASPECT` is written into the frame step state page and the game builds its window textures from it. A game started in portrait keeps its 0.92 picture after the phone turns to landscape (letterboxed at the sides); to get the wider picture of [Screen shape](#screen-shape-dm_screen_aspect-current) on a 19.5:9 phone, start in landscape. Turning a landscape game to portrait keeps the wide picture, fitted into the upper half.
++**`auto` is resolved once, at the game's start**, because `DM_SCREEN_ASPECT` is written into the frame step state page and the game builds its window textures from it. A game started in portrait keeps its 0.92 picture after the phone turns to landscape (pillarboxed at the sides); to get the wider picture of [Screen shape](#screen-shape-dm_screen_aspect-current) on a 19.5:9 phone, start in landscape. Turning a landscape game to portrait keeps the wide picture, fitted into the upper half.
+ 
+ **A phone standing up is handheld, so the game's own keyboard takes touches.** The profile sets no `op_mode`, so the game starts docked and the host hands it no touch points (`touch_read` in `hle_hid.c`), which leaves the game's keyboard unreachable. The front end therefore switches the console mode by the screen's orientation while no TV shows the picture (`followOrientation` in `front_ios.m`): standing up it goes handheld and lying down it returns to the mode the player had, a choice made in the in-game menu included. The game reads touches in both modes, so nothing else has to change, and the switch is the console mode change notification the game watches, so it follows while it runs. Handheld also renders at 1280x720, so the picture is the handheld one while the phone stands up. *Console mode* in the in-game menu (or `DM_OPMODE=0` in `Documents/env.txt`) still works for a phone lying down.
+ 
+@@ -87,7 +87,7 @@ On a taller picture the game caches projections and screen rectangles that a cha
+ 
+ `main+0x265140` is the single `ret` of `nn::ui2d::DrawInfo::SetProjectionMtx`. One chained stub runs the upstream y-row division first (its 16:9 test reads m0 and m5, which the adapter's `Lscreen_projection` rewrites), then calls the adapter's keyboard dock; the adapter adds its offset to index 6 instead of overwriting it. `main+0x27d4c0` forces the footer subtree dirty at `Pane::Calculate` entry and `main+0x27d570` runs `duo_calc` after `CalculateGlobalMatrix`: the two were disassembled and coexist.
+ 
+-The adapter follows the host's `DM_SCREEN_ASPECT` through `dm_fps_state +0x58`. It was built and checked for 1.3 to 1.77; a phone standing up now asks for its upper half's shape (0.92 on a 19.5:9 phone, 1.12 to 1.39 on others), outside that range, and no device has confirmed those ratios yet (an earlier report of a crash at 0.92 has no stack or cause). It does not support arbitrary ratios or folding-display rotation. At `+0x58 = 0` (16:9) every adapter stub runs the original instructions.
++The adapter follows the host's `DM_SCREEN_ASPECT` through `dm_fps_state +0x58`. It was built and checked for 1.3 to 1.77; a phone standing up now asks for its upper half's shape, 0.92 on a 19.5:9 phone and 1.12 on a 375x667 one, below that range, and no device has confirmed those two ratios yet (an earlier report of a crash at 0.92 has no stack or cause). An iPad's 1.39 and a 4:3 one's 1.5 stay inside it. It does not support arbitrary ratios or folding-display rotation. At `+0x58 = 0` (16:9) every adapter stub runs the original instructions.
+ 
+ The frame stamps are values in the free part of the state page, with no host pointer: `+0xa8` is the host's present counter (`dm_guest_frame_tick`, `hle_os.c`, one relaxed store each present), `+0xb0` the keyboard frame's stamp and `+0xb8` a touch panel's, written by `keyboard_frame` and `touch_page` through `Ltouch_stamp` (`x17` = 8 and 16). `Lrecent_keyboard` subtracts the first two, so "the inline keyboard rendered in the last two presents" needs no host state. `keyboard_window` keeps its own stamp at `+0x38`, which nothing reads: AnimalDuo's touch-context (bit 3) was not ported.
+ 
+diff --git a/dm/host/companion_layout.h b/dm/host/companion_layout.h
+index 28a6f4fd..61b6dba4 100644
+--- a/dm/host/companion_layout.h
++++ b/dm/host/companion_layout.h
+@@ -41,11 +41,12 @@ static inline dm_companion_surface_layout dm_companion_surface_make_safe(CGSize
+         p.footer=CGRectMake(0,nav_top,size.width,nav_height);
+         p.nav_scale=scale;
+         // The art window carries the selected tab's capsule (canvas 952..1080, 128): its foot sits
+-        // on the gesture edge, 14 canvas points above the dock row's own top.
++        // on the gesture edge, 14 canvas points above the dock row's own top. The window's own
++        // middle (1016) is what the canvas is placed by, so 952 maps to its top and 1080 to its foot.
+         CGFloat nav_w=1240*scale,nav_h=128*scale,nav_x=(size.width-nav_w)/2;
+         p.nav_art=CGRectMake(nav_x,nav_top-(128-114)*scale,nav_w,nav_h);
+         p.nav_controls=p.footer;
+-        p.nav_offset=CGPointMake(nav_x,CGRectGetMidY(p.nav_art)-1019.5*scale);
++        p.nav_offset=CGPointMake(nav_x,CGRectGetMidY(p.nav_art)-1016*scale);
+         // The footer is drawn over the body and takes its touches, so the content stops at the
+         // bar's top edge: no widget is hidden under the bar or unreachable there.
+         p.content=CGRectMake(0,0,size.width,nav_top);
+diff --git a/dm/host/tests/t_touch.c b/dm/host/tests/t_touch.c
+index 31dc8222..6b4faf03 100644
+--- a/dm/host/tests/t_touch.c
++++ b/dm/host/tests/t_touch.c
+@@ -68,15 +68,20 @@ int main(void) {
+     expect("handheld after console mode: number 19, the Start kept (640, 360)", T0 + 300000006, 19, 1, (want_pt[]){{16666667, 1, 6, 640, 360}});
+     dm_touch_set(NULL, 0); touch_fill((uint8_t[0x290]){0}, T0 + 316666673);                 // sample 20: End
+     // 9 Picture shapes: a wider picture centres the interface across part of the width, so x maps; a taller one centres it across part of
+-    // the height, so y maps. The game reads the touch panel as 1280x720, so the mapped value is what lands there.
++    // the height, so y maps. The game reads the touch panel as 1280x720, so the mapped value is what lands there. The points are off the
++    // middle and the edges: the edges clamp to the same place with or without a mapping, and the middle is a fixed point of every scale.
+     float r = 2.0f; memcpy(g_state_page + 0x58, &r, 4);
+-    dm_touch w = {7, 0.0f, 0.5f}; dm_touch_set(&w, 1);
+-    expect("wider picture: x 0 lands on the interface's left edge (0, 360)", T0 + 333333340, 21, 1, (want_pt[]){{16666667, 1, 7, 0, 360}});
++    dm_touch w = {7, 0.25f, 0.5f}; dm_touch_set(&w, 1);
++    expect("wider picture: x 0.25 lands at 0.21875 of the width (280, 360)", T0 + 333333340, 21, 1, (want_pt[]){{16666667, 1, 7, 280, 360}});
+     dm_touch_set(NULL, 0); touch_fill((uint8_t[0x290]){0}, T0 + 350000007);                 // sample 22: End
+     r = 0.92f; memcpy(g_state_page + 0x58, &r, 4);
+-    dm_touch t = {8, 0.5f, 0.0f}; dm_touch_set(&t, 1);
+-    expect("taller picture: y 0 lands on the interface's top edge (640, 0)", T0 + 366666674, 23, 1, (want_pt[]){{16666667, 1, 8, 640, 0}});
++    dm_touch t = {8, 0.5f, 0.6f}; dm_touch_set(&t, 1);
++    expect("taller picture: y 0.6 lands at 0.6932 of the height (640, 499)", T0 + 366666674, 23, 1, (want_pt[]){{16666667, 1, 8, 640, 499}});
+     dm_touch_set(NULL, 0); touch_fill((uint8_t[0x290]){0}, T0 + 383333341);                 // sample 24: End
++    r = 16.0f / 9.0f; memcpy(g_state_page + 0x58, &r, 4);
++    dm_touch s = {9, 0.25f, 0.6f}; dm_touch_set(&s, 1);
++    expect("16:9 picture: a touch is not mapped (320, 432)", T0 + 400000008, 25, 1, (want_pt[]){{16666667, 1, 9, 320, 432}});
++    dm_touch_set(NULL, 0); touch_fill((uint8_t[0x290]){0}, T0 + 416666675);                 // sample 26: End
+     r = 0.0f; memcpy(g_state_page + 0x58, &r, 4);
+     printf("== %d checks, %d failed ==\n", cases, fails);
+     return fails != 0;
+diff --git a/dm/ios/Sources/DmLayout.h b/dm/ios/Sources/DmLayout.h
+index 756e2306..bbeba575 100644
+--- a/dm/ios/Sources/DmLayout.h
++++ b/dm/ios/Sources/DmLayout.h
+@@ -22,7 +22,7 @@ static inline UIEdgeInsets dm_game_safe_insets(CGRect bounds, UIEdgeInsets inset
+     return insets;
+ }
+ 
+-// The picture's width / height before the game's first present (front.h front_picture_shape gives the real one: a taller shape under DM_SCREEN_ASPECT, 1920x1344)
++// The picture's width / height before the game's first present (front.h front_picture_shape gives the real one: a taller shape under DM_SCREEN_ASPECT, 1920x2088 at 0.92)
+ #define DM_PICTURE_16_9 (16.0 / 9.0)
+ 
+ // The largest centered rectangle of the picture's shape (aspect = width / height) in b. An aspect of 0 is 16:9 (the convention of DM_SCREEN_ASPECT, the
+@@ -54,9 +54,9 @@ static inline BOOL dm_picture_fill(const char *_Nullable value) { return value &
+ // 2.4). 0 = 16:9.
+ static inline float dm_picture_shape_auto(CGSize window, CGFloat topInset) {
+     (void)topInset;
+-    if (window.height > window.width) return (float)(2 * window.width / MAX(window.height, 1));   // standing up: the upper half's shape
+-    double r = MAX(window.width, window.height) / MAX(MIN(window.width, window.height), 1);
+-    return r >= 0.9 && r < 2.4 ? (float)r : 0.0f;
++    double r = window.height > window.width ? 2 * window.width / MAX(window.height, 1)   // standing up: the upper half's shape
++                                            : MAX(window.width, window.height) / MAX(MIN(window.width, window.height), 1);
++    return r >= 0.9 && r < 2.4 ? (float)r : 0.0f;   // loader.c's range; outside it, 16:9
+ }
+ 
+ // The iPhone Duo's fold is retired: an ordinary iPhone splits with no division region.
+diff --git a/dm/ios/tests/duo/Tests/DuoHarnessTests.m b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+index ee00a3b6..ad4b8dd9 100644
+--- a/dm/ios/tests/duo/Tests/DuoHarnessTests.m
++++ b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+@@ -400,6 +400,9 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     XCTAssertEqualWithAccuracy(CGRectGetMaxY(phone.nav_art), 426 - 34, 0.6, @"The dock's foot sits on the gesture edge");
+     XCTAssertEqualWithAccuracy(CGRectGetMinY(phone.nav_art), CGRectGetMinY(phone.footer) - 14 * phone.nav_scale, 0.6,
+                                @"The capsule window rises 14 canvas points above the dock row");
++    // The window's own canvas span (952..1080) lands on its rectangle: the icons are drawn where the art drew them
++    XCTAssertEqualWithAccuracy(phone.nav_offset.y + 952 * phone.nav_scale, CGRectGetMinY(phone.nav_art), 0.6);
++    XCTAssertEqualWithAccuracy(phone.nav_offset.y + 1080 * phone.nav_scale, CGRectGetMaxY(phone.nav_art), 0.6);
+     // A standing band with no home indicator: the bar is the canvas row alone.
+     dm_companion_surface_layout flat = dm_companion_surface_make_safe(CGSizeMake(375, 426), 0, (dm_companion_dock_insets){0});
+     XCTAssertEqualWithAccuracy(flat.footer.size.height, 114 * (375.0 / 1240.0), 0.6);
+@@ -844,11 +847,12 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+ 
+ - (void)testDockingDropsTheTapLayout {
+     CGRect bounds = CGRectMake(0, 0, 844, 390);
+-    [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
++    UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+     dm_pad_layout_set(2);
+     XCTAssertEqual(dm_pad_layout(), 2);
+-    // On a TV the phone shows no picture for a touch to land on (dm_layout_pad_only): Tap goes
+-    [self padForLayout:dm_layout_pad_only(bounds) bounds:bounds];
++    // On a TV the phone shows no picture for a touch to land on (dm_layout_pad_only): the same pad drops Tap
++    dm_gamepad_arrange(pad, dm_layout_pad_only(bounds));
++    [pad setNeedsLayout]; [pad layoutIfNeeded];
+     XCTAssertEqual(dm_pad_layout(), 0, @"On a TV Tap goes");
+     XCTAssertFalse(dm_pad_layout_offered(2));
+     dm_pad_layout_set(2);
+diff --git a/docs/settings.md b/docs/settings.md
+index d08752a9..eec07154 100644
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -296,7 +296,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under
+ | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
+ | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
+ | Picture (iPhone and iPad) | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen, cropped |
+-| Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |
++| Picture shape | `DM_SCREEN_ASPECT` | `auto` the area the picture fills: the screen's own wide shape lying down, the upper half's shape standing up (0.92 on a 19.5:9 phone), else 16:9 (iOS only); `1.43` a taller shape, `2.17` a 19.5:9 phone lying down, `0` 16:9 |
+ | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
+ | Mix with other audio | `DM_AUDIO_MIX` | `1`, `0` |
+ | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |

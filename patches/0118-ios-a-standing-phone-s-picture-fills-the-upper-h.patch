@@ -1,0 +1,282 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Wed, 18 Nov 2026 02:40:48 +0800
+Subject: [PATCH] ios: a standing phone's picture fills the upper half
+
+Upstream-Status: pending
+Reason: a phone standing up asked for a 1.43 picture while the upper half is
+0.92, so the picture was cropped to fill that half; it now asks for the half's
+own shape and is fitted, never cropped or stretched, and a touch's y maps back
+onto the 16:9 interface the game draws centred there. A cold start lying down
+takes the screen's shape from the scene's orientation, which the screen's
+bounds may still report the other way round.
+Issue: none yet: no upstream issue for the iOS front end
+---
+ dm/games/01006F8002326000/README.md      |  8 +++---
+ dm/host/hle_touch.c                      | 18 +++++++++----
+ dm/host/tests/t_touch.c                  | 15 +++++++++++
+ dm/ios/Sources/DmLayout.h                | 24 ++++++++----------
+ dm/ios/Sources/front_ios.m               | 22 ++++++++--------
+ dm/ios/tests/duo/Tests/DuoHarnessTests.m | 32 +++++++++++++-----------
+ 6 files changed, 71 insertions(+), 48 deletions(-)
+
+diff --git a/dm/games/01006F8002326000/README.md b/dm/games/01006F8002326000/README.md
+index f154831f..74b400c3 100644
+--- a/dm/games/01006F8002326000/README.md
++++ b/dm/games/01006F8002326000/README.md
+@@ -61,11 +61,9 @@ Checked on a Mac (M1, macOS 27, headless, an island save) against 16:9: the 3D v
+ 
+ ## iPhone portrait (current)
+ 
+-A phone standing up shows the game's 16:9 picture above the touch controls, not a portrait picture: `dm/ios/Sources/DmLayout.h` gives the picture the height its own width asks for, puts it at the safe area's top and gives the rest of the window to the band under it, where `DmGamepad.m`'s portrait anchors draw the pad (the two thumb groups at 0.28 and 0.72 of the width, 0.58 down) over the companion's own view (below). A 390x844 phone (iPhone 14 and the like) gets a 390x219 picture with no bars above or below it and a 390x566 band; the safe areas are kept whole, so the notch and the home indicator are clear of both. Halving that window instead left the picture 219 of the upper part's 422 points, bars making up the other 48 % of it. The picture never takes more than half the window: an iPad's 4:3 asks for more than half, so it keeps the midpoint split it had, and an iPad mini's 1.52 picture is its own height either way, with only the bars it used to have going to the band. A fold sets both edges itself.
++A phone standing up shows the game's picture in the upper half of the window and the companion band in the lower half: `dm/ios/Sources/DmLayout.h` splits the window at its midpoint, and the picture is fitted into that half. *Picture shape* `auto` asks for the half's own shape (twice the window's width / its height: 0.92 on a 19.5:9 phone, 1.12 on a 375x667 one, 1.39 on an iPad), so the fitted picture fills the half exactly: its background covers the area with nothing cropped and nothing stretched. The game's own layouts keep 16:9, centred in the picture (the adapter's `SetProjectionMtx` y-row division, below), so its HUD and menus are not stretched either; the touch screen maps a touch on the taller picture back onto that centred rectangle (`ui_y` in `hle_touch.c`), so a control is hit where it is drawn. A manual `DM_SCREEN_ASPECT` that does not match the half keeps its whole picture and leaves bars instead of cropping it. The picture never takes more than half the window, so the band keeps the other half; a fold sets both edges itself.
+ 
+-The picture keeps 16:9 because a phone's long side is 1.78 to 2.16 times its short one, and 16:9 across the full width is what leaves the band the room a phone standing up has. The front end therefore resolves *Picture shape* `auto` to `0` (16:9) for a window taller than it is wide whose long side is 1.77 or more, and keeps the window's own shape for an iPad or an unfolded Duo (1.33 to 1.52), where the picture is taller than 16:9.
+-
+-**`auto` is resolved once, at the game's start**, because `DM_SCREEN_ASPECT` is written into the frame step state page and the game builds its window textures from it. A game started in portrait keeps its 16:9 picture after the phone turns to landscape (with black bars at the sides); to get the wider picture of [Screen shape](#screen-shape-dm_screen_aspect-current) on a 19.5:9 phone, start in landscape. Turning a landscape game to portrait keeps the wide picture, fitted into the upper part.
++**`auto` is resolved once, at the game's start**, because `DM_SCREEN_ASPECT` is written into the frame step state page and the game builds its window textures from it. A game started in portrait keeps its 0.92 picture after the phone turns to landscape (letterboxed at the sides); to get the wider picture of [Screen shape](#screen-shape-dm_screen_aspect-current) on a 19.5:9 phone, start in landscape. Turning a landscape game to portrait keeps the wide picture, fitted into the upper half.
+ 
+ **A phone standing up is handheld, so the game's own keyboard takes touches.** The profile sets no `op_mode`, so the game starts docked and the host hands it no touch points (`touch_read` in `hle_hid.c`), which leaves the game's keyboard unreachable. The front end therefore switches the console mode by the screen's orientation while no TV shows the picture (`followOrientation` in `front_ios.m`): standing up it goes handheld and lying down it returns to the mode the player had, a choice made in the in-game menu included. The game reads touches in both modes, so nothing else has to change, and the switch is the console mode change notification the game watches, so it follows while it runs. Handheld also renders at 1280x720, so the picture is the handheld one while the phone stands up. *Console mode* in the in-game menu (or `DM_OPMODE=0` in `Documents/env.txt`) still works for a phone lying down.
+ 
+@@ -89,7 +87,7 @@ On a taller picture the game caches projections and screen rectangles that a cha
+ 
+ `main+0x265140` is the single `ret` of `nn::ui2d::DrawInfo::SetProjectionMtx`. One chained stub runs the upstream y-row division first (its 16:9 test reads m0 and m5, which the adapter's `Lscreen_projection` rewrites), then calls the adapter's keyboard dock; the adapter adds its offset to index 6 instead of overwriting it. `main+0x27d4c0` forces the footer subtree dirty at `Pane::Calculate` entry and `main+0x27d570` runs `duo_calc` after `CalculateGlobalMatrix`: the two were disassembled and coexist.
+ 
+-The adapter follows the host's `DM_SCREEN_ASPECT` (1.3 to 1.77) through `dm_fps_state +0x58`; it does not support arbitrary ratios or folding-display rotation. At `+0x58 = 0` (16:9, or `auto` on iOS) every adapter stub runs the original instructions.
++The adapter follows the host's `DM_SCREEN_ASPECT` through `dm_fps_state +0x58`. It was built and checked for 1.3 to 1.77; a phone standing up now asks for its upper half's shape (0.92 on a 19.5:9 phone, 1.12 to 1.39 on others), outside that range, and no device has confirmed those ratios yet (an earlier report of a crash at 0.92 has no stack or cause). It does not support arbitrary ratios or folding-display rotation. At `+0x58 = 0` (16:9) every adapter stub runs the original instructions.
+ 
+ The frame stamps are values in the free part of the state page, with no host pointer: `+0xa8` is the host's present counter (`dm_guest_frame_tick`, `hle_os.c`, one relaxed store each present), `+0xb0` the keyboard frame's stamp and `+0xb8` a touch panel's, written by `keyboard_frame` and `touch_page` through `Ltouch_stamp` (`x17` = 8 and 16). `Lrecent_keyboard` subtracts the first two, so "the inline keyboard rendered in the last two presents" needs no host state. `keyboard_window` keeps its own stamp at `+0x38`, which nothing reads: AnimalDuo's touch-context (bit 3) was not ported.
+ 
+diff --git a/dm/host/hle_touch.c b/dm/host/hle_touch.c
+index cdabc629..c73783bc 100644
+--- a/dm/host/hle_touch.c
++++ b/dm/host/hle_touch.c
+@@ -17,10 +17,11 @@ static struct { int down, pend; float x, y; } g_gf[16];   // the gesture recogni
+ static pthread_mutex_t g_tl = PTHREAD_MUTEX_INITIALIZER;
+ static int64_t g_tsamp; static uint64_t g_tlast_ns;
+ 
+-// On a picture wider than 16:9 the game's interface keeps a 16:9 projection (view.s's Lscreen_projection scales the layout projection's x by
+-// (16/9)/r), so it is drawn centred across that fraction of the width while the picture itself fills the screen. The front end normalises a
+-// touch on the whole picture, so map it back onto that centred rectangle: a control is hit where it is drawn, and the screen's edges reach the
+-// interface's edges (a touch outside it clamps there). 16:9 and taller pictures are left alone.
++// On a picture that is not 16:9 the game's interface keeps a 16:9 projection (view.s's Lscreen_projection keeps one axis and scales the other),
++// so it is drawn centred in a 16:9 rectangle while the picture itself fills the screen. The front end normalises a touch on the whole picture, so
++// map it back onto that centred rectangle: a control is hit where it is drawn, and the screen's edges reach the interface's edges (a touch outside
++// it clamps there). A wider picture centres the interface across a fraction of the width, so x maps; a taller one centres it across a fraction of
++// the height, so y maps. 16:9 is left alone.
+ __attribute__((weak)) uint8_t *dm_fps_state;   // loader.c defines it; a unit test that links only this file has no frame step page, and NULL means 16:9
+ static float ui_x(float x) {
+     if (!dm_fps_state) return x;
+@@ -29,12 +30,19 @@ static float ui_x(float x) {
+     float v = 0.5f + (x - 0.5f) / ((16.0f / 9.0f) / r);
+     return v < 0 ? 0 : v > 1 ? 1 : v;
+ }
++static float ui_y(float y) {
++    if (!dm_fps_state) return y;
++    float r; memcpy(&r, dm_fps_state + 0x58, 4);
++    if (!(r > 0.0f) || !(r < 16.0f / 9.0f)) return y;
++    float v = 0.5f + (y - 0.5f) * ((16.0f / 9.0f) / r);
++    return v < 0 ? 0 : v > 1 ? 1 : v;
++}
+ static void touch_apply(const dm_touch *t, int n) {
+     pthread_mutex_lock(&g_tl);
+     int seen[16] = {0};
+     for (int i = 0; i < n; i++) {
+         uint32_t id = t[i].id; if (id >= 16) continue;
+-        float tx = ui_x(t[i].x), ty = t[i].y;
++        float tx = ui_x(t[i].x), ty = ui_y(t[i].y);
+         seen[id] = 1;
+         if (!g_gf[id].down) g_gf[id].pend = 1;
+         g_gf[id].down = 1; g_gf[id].x = tx; g_gf[id].y = ty;
+diff --git a/dm/host/tests/t_touch.c b/dm/host/tests/t_touch.c
+index 88d43fde..31dc8222 100644
+--- a/dm/host/tests/t_touch.c
++++ b/dm/host/tests/t_touch.c
+@@ -4,6 +4,9 @@
+ #include <string.h>
+ #include <stdint.h>
+ typedef struct { uint32_t id; float x, y; } dm_touch;
++// The frame step page hle_touch.c reads +0x58 from: zero (16:9) until the picture-shape cases set a ratio.
++static uint8_t g_state_page[0x60];
++uint8_t *dm_fps_state = g_state_page;
+ void dm_touch_set(const dm_touch *t, int n);
+ int touch_fill(void *out, uint64_t now_ns);
+ int touch_fill_n(void *out, int max, uint64_t now_ns, int points);
+@@ -63,6 +66,18 @@ int main(void) {
+         int r = touch_fill_n(got, 16, T0 + 283333339, 0); cases++;
+         if (r != 0 || memcmp(got, exp, sizeof exp)) { fails++; printf("\u2717 console mode: an empty state numbered 18\n"); } else printf("\u2713 console mode: an empty state numbered 18\n"); }
+     expect("handheld after console mode: number 19, the Start kept (640, 360)", T0 + 300000006, 19, 1, (want_pt[]){{16666667, 1, 6, 640, 360}});
++    dm_touch_set(NULL, 0); touch_fill((uint8_t[0x290]){0}, T0 + 316666673);                 // sample 20: End
++    // 9 Picture shapes: a wider picture centres the interface across part of the width, so x maps; a taller one centres it across part of
++    // the height, so y maps. The game reads the touch panel as 1280x720, so the mapped value is what lands there.
++    float r = 2.0f; memcpy(g_state_page + 0x58, &r, 4);
++    dm_touch w = {7, 0.0f, 0.5f}; dm_touch_set(&w, 1);
++    expect("wider picture: x 0 lands on the interface's left edge (0, 360)", T0 + 333333340, 21, 1, (want_pt[]){{16666667, 1, 7, 0, 360}});
++    dm_touch_set(NULL, 0); touch_fill((uint8_t[0x290]){0}, T0 + 350000007);                 // sample 22: End
++    r = 0.92f; memcpy(g_state_page + 0x58, &r, 4);
++    dm_touch t = {8, 0.5f, 0.0f}; dm_touch_set(&t, 1);
++    expect("taller picture: y 0 lands on the interface's top edge (640, 0)", T0 + 366666674, 23, 1, (want_pt[]){{16666667, 1, 8, 640, 0}});
++    dm_touch_set(NULL, 0); touch_fill((uint8_t[0x290]){0}, T0 + 383333341);                 // sample 24: End
++    r = 0.0f; memcpy(g_state_page + 0x58, &r, 4);
+     printf("== %d checks, %d failed ==\n", cases, fails);
+     return fails != 0;
+ }
+diff --git a/dm/ios/Sources/DmLayout.h b/dm/ios/Sources/DmLayout.h
+index 6f416c57..756e2306 100644
+--- a/dm/ios/Sources/DmLayout.h
++++ b/dm/ios/Sources/DmLayout.h
+@@ -47,15 +47,14 @@ static inline CGRect dm_aspect_fill(CGRect b, CGFloat aspect) {
+ 
+ static inline BOOL dm_picture_fill(const char *_Nullable value) { return value && !strcmp(value, "fill"); }   // DM_PICTURE_FIT: fit (default) or fill
+ 
+-// Picture shape "auto" (the launcher's Match screen): the window's own shape when it is wider than 16:9 (a 19.5:9 phone lying down at 2.17:1), else 16:9.
+-// A phone standing up asks for 1.43 as well (1920x1344, 1280x896): a game's screen-shape stubs translate the shape into its own sizes, and the shapes a game
+-// accepts are the ones the adapter was built for (ACNH's adapter follows DM_SCREEN_ASPECT from 1.3 to 1.77; a square or a 0.92 portrait one crashes it).
+-// The range is loader.c's (0.9 to 2.4). 0 = 16:9.
+-#define DM_PICTURE_PORTRAIT 1.43f   // the shape a standing phone asks for: the adapter's own ratio (1920x1344)
+-
++// Picture shape "auto" (the launcher's Match screen): the shape of the area the picture fills, so its background covers that
++// area with nothing cropped. Lying down that is the screen's own wide shape (a 19.5:9 phone at 2.17:1); standing up it is the
++// upper half's shape (twice the screen's width / its height: 0.92 on a 19.5:9 phone). A game's screen-shape stubs translate the
++// shape into its own sizes, and the shapes a game accepts are the ones the adapter was built for; the range is loader.c's (0.9 to
++// 2.4). 0 = 16:9.
+ static inline float dm_picture_shape_auto(CGSize window, CGFloat topInset) {
+     (void)topInset;
+-    if (window.height > window.width) return DM_PICTURE_PORTRAIT;   // standing up: the adapter's taller shape
++    if (window.height > window.width) return (float)(2 * window.width / MAX(window.height, 1));   // standing up: the upper half's shape
+     double r = MAX(window.width, window.height) / MAX(MIN(window.width, window.height), 1);
+     return r >= 0.9 && r < 2.4 ? (float)r : 0.0f;
+ }
+@@ -72,9 +71,9 @@ static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOp
+     division = dm_horizontal_division(b, division);
+     BOOL portrait = b.size.height > b.size.width;
+     if (!portrait && (!partiallyOpen || CGRectIsNull(division))) return l;
+-    // A phone standing up with no fold splits the screen at its midpoint: the picture takes the upper half, the panel the lower half. The guest's
+-    // picture keeps its own shape (16:9), which does not fit that half, so the picture is cropped to fill it (dm_aspect_fill): the sides are cut, never
+-    // stretched. A fold sets both edges within the safe area.
++    // A phone standing up with no fold splits the screen at its midpoint: the picture takes the upper half, the panel the lower half. Picture shape
++    // "auto" asks for that half's own shape, so the fitted picture fills it exactly; a shape that does not match (a manual DM_SCREEN_ASPECT) keeps its
++    // whole picture and leaves bars instead of cropping it. A fold sets both edges within the safe area.
+     BOOL folded = NO;   // the iPhone Duo's fold is retired: a split is the phone standing up, with no fold
+     CGRect safe = UIEdgeInsetsInsetRect(b, insets);
+     CGFloat upperBottom = folded ? CGRectGetMinY(division) : CGRectGetMidY(b);
+@@ -83,9 +82,8 @@ static inline DmLayout dm_layout(CGRect b, UIEdgeInsets insets, BOOL partiallyOp
+                           : CGRectMake(CGRectGetMinX(b), CGRectGetMinY(b), b.size.width, upperBottom - CGRectGetMinY(b));
+     CGRect lower = CGRectMake(CGRectGetMinX(b), bandTop, b.size.width, CGRectGetMaxY(b) - bandTop);
+     if (upper.size.height <= 0) return l;
+-    // A standing phone crops the guest's picture to fill the upper half, so the picture takes half the screen. The picture is wider than the upper half
+-    // (16:9 in a tall half), so its sides are cropped: the guest keeps its shape, nothing is stretched. A fold keeps the picture fitted, so it stays whole.
+-    l.game = (portrait && !folded && aspect > 0 && aspect < DM_PICTURE_16_9) ? dm_aspect_fill(upper, aspect) : dm_aspect_fit(upper, aspect);
++    // The picture keeps its whole shape: with "auto" that shape is the upper half's, so the fitted rectangle fills it exactly. Nothing is stretched.
++    l.game = dm_aspect_fit(upper, aspect);
+     l.companion = lower; l.controls = lower; l.separated = YES;
+     return l;
+ }
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index 40d91ca4..2a56c79a 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -203,20 +203,22 @@ static void launcher_done(void) { [g_root startGame]; }
+     front_hud_env();   // before the process's first Metal device, which reads MTL_HUD_ENABLED (an env file's DM_METAL_HUD sets it in main.m already; GitHub issue #840)
+     const char *dev = front_ios_device_check();   // that first device: a GPU without BC textures is refused here, not at launch, so the launcher's HUD switch counts
+     if (dev) { [self showHint:[NSString stringWithFormat:@"This device is not supported.\n%s", dev]]; return; }   // the host does not start
+-    {   // Picture shape "auto" (the launcher's Match screen): the app window's own shape when it is taller or wider than 16:9 (an iPad's 4:3, an unfolded iPhone Duo's 1.43:1,
+-        // a 19.5:9 phone in landscape at 2.17:1), else 16:9. The window's, not the screen's: on an iPad under Stage Manager or Split View the app does not fill the screen. Resolved
+-        // here, before the host writes the state page (main.c dm_fps_state_apply). The orientation picks the calculation: a phone lying down shows the screen's own
+-        // wide shape (the wide picture patch renders it in that shape, uncropped), a phone standing up asks for the standing shape (DM_PICTURE_PORTRAIT), so the picture
+-        // fills the upper half and the panel the lower half. Physical rotation changes nothing.
++    {   // Picture shape "auto" (the launcher's Match screen): the shape of the area the picture fills, so its background covers that area with nothing
++        // cropped. Lying down that is the screen's own wide shape (a 19.5:9 phone at 2.17:1); standing up it is the upper half's shape, so the picture
++        // fills that half and the panel takes the lower half. The console mode is not part of it: it changes the game's resolution, not the picture's
++        // shape. Resolved here, before the host writes the state page (main.c dm_fps_state_apply). Physical rotation changes nothing.
+         const char *a = getenv("DM_SCREEN_ASPECT");
+         if (a && !strcmp(a, "auto")) {
+-            // The window's bounds are still the other shape on a cold start (the scene turns after this call). Use the screen's physical size and its own
+-            // orientation, so a phone launched lying down resolves to its wide shape, not to 16:9.
++            // The screen's bounds are still the other shape on a cold start (the scene turns after this call). Put its edges in the order the scene's
++            // orientation says, so a phone launched lying down resolves to its wide shape, not to the standing one.
+             CGSize sz = UIScreen.mainScreen.bounds.size;
+-            BOOL landscape = sz.width > sz.height;
+-            float r = dm_picture_shape_auto(sz, 0);   // the screen's own shape: its wide one lying down, the standing shape upright
++            UIWindowScene *scene = self.view.window.windowScene;
++            BOOL portrait = scene ? UIInterfaceOrientationIsPortrait(scene.interfaceOrientation) : sz.height > sz.width;
++            if (!portrait && sz.width < sz.height) sz = CGSizeMake(sz.height, sz.width);
++            if (portrait && sz.width > sz.height) sz = CGSizeMake(sz.height, sz.width);
++            float r = dm_picture_shape_auto(sz, 0);
+             char v[16]; if (r > 0) snprintf(v, sizeof v, "%.3f", r); else strcpy(v, "0");
+-            setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: screen %.0fx%.0f points (%s) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, landscape ? "landscape" : "standing", v);
++            setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: screen %.0fx%.0f points (%s) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, portrait ? "standing" : "lying down", v);
+         }
+     }
+     self.fill = dm_picture_fill(getenv("DM_PICTURE_FIT"));
+diff --git a/dm/ios/tests/duo/Tests/DuoHarnessTests.m b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+index b776067b..b40b5a4c 100644
+--- a/dm/ios/tests/duo/Tests/DuoHarnessTests.m
++++ b/dm/ios/tests/duo/Tests/DuoHarnessTests.m
+@@ -254,7 +254,8 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+         XCTAssertTrue(CGRectEqualToRect(layout.controls, layout.companion),
+                       @"The pad floats over the whole band");
+         XCTAssertEqualWithAccuracy(layout.game.size.width / layout.game.size.height, aspect, 0.001);
+-        XCTAssertEqualWithAccuracy(layout.game.size.height, splitY, 0.5, @"The cropped picture fills the upper half");
++        XCTAssertEqualWithAccuracy(layout.game.size.height, splitY, 0.5, @"The picture fills the upper half");
++        XCTAssertEqualWithAccuracy(layout.game.size.width, bounds.size.width, 0.5, @"Its sides are not cropped: %@", NSStringFromCGRect(layout.game));
+         XCTAssertLessThanOrEqual(CGRectGetMaxY(layout.game), CGRectGetMinY(layout.companion), @"The band's top leaves no video/panel overlap");
+     }
+ }
+@@ -278,33 +279,33 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+ }
+ 
+ - (void)testPictureShapeAutoFillsHalfTheScreenWhenStandingUp {
+-    // A phone standing up keeps the guest's own 16:9 picture (a shape the game accepts): the front end crops it to fill the upper half
+-    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(390, 844), 59), DM_PICTURE_PORTRAIT, 0.001);
+-    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(375, 667), 50), DM_PICTURE_PORTRAIT, 0.001);
+-    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(430, 932), 59), DM_PICTURE_PORTRAIT, 0.001);
+-    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(820, 1180), 24), DM_PICTURE_PORTRAIT, 0.001);
+-    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(744, 1133), 24), DM_PICTURE_PORTRAIT, 0.001);
+-    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(1032, 1376), 24), DM_PICTURE_PORTRAIT, 0.001, @"An unfolded Duo standing up");
++    // A phone standing up asks for the upper half's own shape, so the picture fills that half with nothing cropped.
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(390, 844), 59), 2 * 390.0 / 844.0, 0.001);
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(375, 667), 50), 2 * 375.0 / 667.0, 0.001);
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(430, 932), 59), 2 * 430.0 / 932.0, 0.001);
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(820, 1180), 24), 2 * 820.0 / 1180.0, 0.001);
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(744, 1133), 24), 2 * 744.0 / 1133.0, 0.001);
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(1032, 1376), 24), 2 * 1032.0 / 1376.0, 0.001, @"An unfolded Duo standing up");
+     XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(1376, 1032), 0), 1376.0 / 1032.0, 0.001, @"An unfolded Duo lying down is 4:3");
+-    // A window wider than 16:9 keeps its own shape: loader.c takes 1.3 to 2.4, so a phone lying down at 19.5:9 is a shape to render in
++    // A window wider than 16:9 keeps its own shape: loader.c takes 0.9 to 2.4, so a phone lying down at 19.5:9 is a shape to render in
+     XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(844, 390), 0), 844.0 / 390.0, 0.001, @"A 19.5:9 phone lying down");
+     XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(1024, 768), 0), 1024.0 / 768.0, 0.001, @"An iPad lying down is 4:3");
+     // A square window takes its own shape while lying down (height is not greater than width)
+     XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(600, 600), 0), 1.0f, 0.001);
+     XCTAssertEqual(dm_picture_shape_auto(CGSizeZero, 0), 0.0f);
+-    // The screen's own shape by its orientation: a phone lying down keeps its wide shape (the wide picture patch renders it uncropped), a phone standing up
+-    // asks for the standing shape.
+-    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(402, 874), 0), DM_PICTURE_PORTRAIT, 0.001, @"An iPhone 17 Pro standing up");
++    // The screen's own shape by its orientation: a phone lying down keeps its wide shape, a phone standing up asks for the upper half's shape.
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(402, 874), 0), 2 * 402.0 / 874.0, 0.001, @"An iPhone 17 Pro standing up");
++    XCTAssertEqualWithAccuracy(dm_picture_shape_auto(CGSizeMake(874, 402), 0), 874.0 / 402.0, 0.001, @"The same phone lying down");
+ }
+ 
+ - (void)testPortraitWithoutHingeStatusStillSplitsVideoAboveControls {
+     // A phone standing up splits the screen at its midpoint: the picture fills the upper half, the panel the lower half
+     DmLayout layout = dm_layout(CGRectMake(0, 0, 390, 844), UIEdgeInsetsMake(59, 0, 34, 0), NO, CGRectNull, dm_picture_shape_auto(CGSizeMake(390, 844), 59));
+     XCTAssertTrue(layout.separated);
+-    XCTAssertEqualWithAccuracy(layout.game.size.height, 422, 0.5, @"The cropped picture fills the upper half's height: %@", NSStringFromCGRect(layout.game));
++    XCTAssertEqualWithAccuracy(layout.game.size.height, 422, 0.5, @"The picture fills the upper half's height: %@", NSStringFromCGRect(layout.game));
+     XCTAssertEqualWithAccuracy(CGRectGetMinY(layout.game), 0, 0.5, @"It starts at the top of the screen");
+     XCTAssertEqualWithAccuracy(CGRectGetMaxY(layout.game), CGRectGetMinY(layout.companion), 0.5, @"No bar between the picture and the band");
+-    XCTAssertGreaterThan(layout.game.size.width, 390, @"The picture is wider than the screen: its sides are cropped");
++    XCTAssertEqualWithAccuracy(layout.game.size.width, 390, 0.5, @"The picture is the screen's width: its sides are not cropped");
+     XCTAssertEqualWithAccuracy(CGRectGetMinY(layout.companion), 422, 0.5);
+     XCTAssertEqualWithAccuracy(layout.companion.size.height, 422, 0.5, @"The panel keeps the lower half");
+     XCTAssertTrue(CGRectEqualToRect(layout.controls, layout.companion), @"The pad floats over the whole band");
+@@ -313,7 +314,8 @@ static BOOL gDuoHarnessReduceMotionEnabled;
+     DmLayout ipad = dm_layout(CGRectMake(0, 0, 820, 1180), UIEdgeInsetsMake(24, 0, 20, 0), NO, CGRectNull, dm_picture_shape_auto(CGSizeMake(820, 1180), 24));
+     XCTAssertTrue(ipad.separated);
+     XCTAssertEqualWithAccuracy(CGRectGetMinY(ipad.companion), 590, 0.5, @"An iPad splits at its midpoint");
+-    XCTAssertEqualWithAccuracy(ipad.game.size.height, 590, 0.5, @"The cropped picture fills the upper half");
++    XCTAssertEqualWithAccuracy(ipad.game.size.height, 590, 0.5, @"The picture fills the upper half");
++    XCTAssertEqualWithAccuracy(ipad.game.size.width, 820, 0.5, @"Its sides are not cropped");
+ }
+ 
+ - (void)testCompanionTakesTheBandUnderThePictureAndNoOtherLayoutHasOne {

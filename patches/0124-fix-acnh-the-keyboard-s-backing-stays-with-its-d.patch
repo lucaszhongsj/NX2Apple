@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: lucaszhongsj <lucaszhongsj@foxmail.com>
+Date: Wed, 18 Nov 2026 11:59:04 +0800
+Subject: [PATCH] fix(acnh): the keyboard's backing stays with its dialog
+
+The edge rule moved a widget at the layout's bottom out to the taller
+picture's edge. The name entry's backing, 1240 of 1920 wide, is part of
+the dialog's card, and the keys above it sit in the layout's middle: the
+backing went to the picture's bottom and the keys stayed, so the keyboard
+tore in two.
+
+A widget at least 60% of the layout's width is a panel and keeps the place
+its dialog gives it. The island's edge widgets (clock, minimap, ZL icon,
+button guides) are narrow and still move out; checked at 0.92 with an
+island save and at the intro's name entry.
+
+Upstream-Status: pending
+Reason: the name entry's keyboard tore at a taller picture: the edge rule took
+its backing (1240 of 1920 wide, across the dialog's bottom) out to the picture's
+edge while the keys above it, in the layout's middle, stayed. A widget at least
+60% of the layout's width is a panel and stays with its dialog
+Issue: none yet: no upstream issue for the picture shape
+
+---
+ dm/games/01006F8002326000/README.md    | 4 ++--
+ dm/games/01006F8002326000/duo_anchor.c | 4 ++++
+ dm/games/01006F8002326000/patches.py   | 2 +-
+ 3 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/dm/games/01006F8002326000/README.md b/dm/games/01006F8002326000/README.md
+index 8771df84..4a20d6dc 100644
+--- a/dm/games/01006F8002326000/README.md
++++ b/dm/games/01006F8002326000/README.md
+@@ -56,9 +56,9 @@ With `DM_SCREEN_ASPECT=1.43` (launcher setting *Picture shape*, offered because
+ - **Tall pictures** (the output narrows). The game's layout tables stop at a display height of 2048: 0.9375 and 0.936 start, 0.935 does not. A phone's upper half (0.92) asks for 2088, so `loader.c` narrows the output instead of growing it: 1880x2040 keeps the shape to 0.17%, and the layout space is 1280x1389 (state +0x64 is the output's width, which every size above scales by). Two fixes of the game's own code come with it, at every shape: the fixed heap (cSys, the size table at `main+0x404d658`) grows by 32 MB (168.9 to 200.9), because the taller display's capture buffers and layers outgrow it (an allocation at `main+0x37c6a10` fails); and the capture manager (`main+0x3848e10`) no longer takes its destroy path, which clears `[x22+0xa0]` at `main+0x3849774` and leaves the null the frame reads at `main+0x38497c0` / `main+0x38497dc` (fault address 0x85 at `main+0x38497e0`; the branch to `main+0x38497a8` is the path a frame without a match takes).
+ - **The view** (bit 5). The island camera keeps its vertical angle in radians at +0x2cc (0.384, 22 degrees) and reads it twice (`main+0x7a895c`, `main+0x7a89a8`); both reads, and the other camera path's half angle (`main+0x386a7a0`), are widened to 2 atan(tan(fovy/2) k), k = (16/9) / ratio. The aspect already follows the taller viewport, so before this the picture kept the vertical angle and lost a fifth of each side.
+ - **Layouts' projection** (bit 6). `nn::ui2d::DrawInfo::SetProjectionMtx` (`main+0x265100`) gets the layouts' perspective projection of a 16:9 rectangle (m0 1.545, m5 2.747, fovy 40 degrees); its y row is divided by the vertical stretch (layout height / 720) before the return, so layouts keep their shape, centred. Only a projection within 5% of 16:9 is divided: the game copies a DrawInfo's projection into another, and without the check the title's layouts were divided twice.
+-- **Edges and backgrounds** (bit 9, `duo_anchor.c`, run after `nn::ui2d::Pane::Calculate` has computed a pane's global matrix, `main+0x27d570`). The game's panes are its own classes (no RTTI): what draws is told by its vtable's DrawSelf (slot 21) against `nn::ui2d::Pane::DrawSelf` (`main+0x27e2c8`, empty). A full-screen or full-height background leaf is stretched to the taller screen; a widget (the topmost pane of its chain that is not a null pane, alignment or layout-sized container) beyond 230 units from the middle towards a corner (|x| 400 or more), or 270 nearer the middle, moves out by the extra half-height with its children. Layouts are 1920x1080 (793 of 959) or 1280x720; the distances are in 720 units and scaled by the root pane's size. Layouts placed by their root (balloons over characters) are left alone. `_duo_anchor` (patches.py) is the code of `duo_anchor.c` built with the command in the comment above it.
++- **Edges and backgrounds** (bit 9, `duo_anchor.c`, run after `nn::ui2d::Pane::Calculate` has computed a pane's global matrix, `main+0x27d570`). The game's panes are its own classes (no RTTI): what draws is told by its vtable's DrawSelf (slot 21) against `nn::ui2d::Pane::DrawSelf` (`main+0x27e2c8`, empty). A full-screen or full-height background leaf is stretched to the taller screen; a widget (the topmost pane of its chain that is not a null pane, alignment or layout-sized container) beyond 230 units from the middle towards a corner (|x| 400 or more), or 270 nearer the middle, moves out by the extra half-height with its children. A widget as wide as 60% of the layout is a panel, not an edge widget, and stays where its dialog has it: the keyboard's backing is 1240 of 1920 wide across the bottom of the name dialog, and moving it alone tore the keyboard, the keys above it sitting in the layout's middle and staying. Layouts are 1920x1080 (793 of 959) or 1280x720; the distances are in 720 units and scaled by the root pane's size. Layouts placed by their root (balloons over characters) are left alone. `_duo_anchor` (patches.py) is the code of `duo_anchor.c` built with the command in the comment above it.
+ 
+-Checked on a Mac (M1, macOS 27, headless, an island save) against 16:9: the 3D view keeps 16:9's sides and shows more above and below; the title's version, press-A and settings lines, the island's ZL icon, clock, minimap and button guides sit at the new edges; the pockets, the phone (its backdrop's light band stretched) and the save dialog keep their shape. On an iPhone Duo (iOS 27.1) an earlier build of this looked right to its player. Open: an NPC's dialog box stays at its 16:9 place (-320), not at the taller screen's bottom edge; the phone's blurred backdrop shows a hard edge at its top left.
++Checked on a Mac (M1, macOS 27, headless, an island save) against 16:9: the 3D view keeps 16:9's sides and shows more above and below; the title's version, press-A and settings lines, the island's ZL icon, clock, minimap and button guides sit at the new edges; the pockets, the phone (its backdrop's light band stretched) and the save dialog keep their shape. At 0.92 (the iPhone's upper half) an island save shows the same: the ZL icon, clock and minimap at the picture's corners, the phone and the map inside the 16:9 band, and the name entry's keyboard whole in the band, its backing under the keys, its bottom bar at the picture's bottom. On an iPhone Duo (iOS 27.1) an earlier build of this looked right to its player. Open: an NPC's dialog box stays at its 16:9 place (-320), not at the taller screen's bottom edge; the phone's blurred backdrop shows a hard edge at its top left.
+ 
+ ## iPhone portrait (current)
+ 
+diff --git a/dm/games/01006F8002326000/duo_anchor.c b/dm/games/01006F8002326000/duo_anchor.c
+index ddb4dd6c..052b73ae 100644
+--- a/dm/games/01006F8002326000/duo_anchor.c
++++ b/dm/games/01006F8002326000/duo_anchor.c
+@@ -56,6 +56,10 @@ void duo_calc(char *pane, const float *st, const void *fn_null_draw) {
+         if (!container(p, fn_null_draw, st, u)) return;   // a widget above: the widget's top is further up
+         p = par;
+     }
++    // A widget as wide as the layout is a panel, not one of the edge widgets this rule places: the keyboard's backing
++    // (1240 of 1920 wide, across the dialog's bottom) is part of the dialog, and moving it alone takes the bottom row
++    // away from the keys above it, which sit in the layout's middle and stay. It stays with the rest of the dialog
++    if (gw >= st[4] * u * 0.6f) return;
+     float *gy = g + 7;
+     // In 720 units (x 1.5 in the 1080 space): 230 for a widget towards a corner (|x| 400 or more: the top right's road and album buttons at 420 and 389, the bottom left's
+     // clock at -416, the bottom right's minimap at -354, the title's version and settings lines), 270 for one nearer the middle (the bottom's button guides at -486 and
+diff --git a/dm/games/01006F8002326000/patches.py b/dm/games/01006F8002326000/patches.py
+index ed534fa4..57781b02 100644
+--- a/dm/games/01006F8002326000/patches.py
++++ b/dm/games/01006F8002326000/patches.py
+@@ -422,7 +422,7 @@ _size_sites = [
+ # calls CalculateGlobalMatrix (main+0x27d74c) when the pane or a parent changed and returns to main+0x27d570, before the children's Calculate (vtable +0x98): the stub there
+ # calls duo_calc(pane, state + 0x80, nn::ui2d::Pane::DrawSelf) while the output's height is set (bit 9 of the sites). x0..x18 and x30 are dead there (the function reloads
+ # x30 from its frame), d8 is callee-saved
+-_duo_anchor = 'bd4000211e20202854000041d65f03c0f9400c08b4ffffc852800609aa0803eaf9400d4bb400008baa0b03ea7100052954ffff81bd40554052a88f491e2701221e2220001e2e10001e2f10021e20ac40bd4070022d4a14031e2208641e2288621e2020881e244c44bd4084031e2308a21e2388a51e2020481e224ca5f94014099100800abd4010221e2208021e222080540003cbbd4014261e2608061e2620a05400034bbd4018261e2608061e2620a0540002c8bd407c061e20c0c652a8440b1e2701671e2708071e2720c0540001e5bd408c061e20c0d01e27220054000165eb0a013f54fff941f9400008f9405508eb02011f54fff8c0bd400420bd4080011e2108001400001ceb0a013f540004c1bd4014261e2608061e2620a05400044b52a886891e2701261e260806bd4004271e3010101f0740c61e2620a054000345bd408c061e20c0d052a844091e2701311e3108111e31220054000265f9400009f9405529eb02013f540001e0bd4080001e2008e0bd008000bd4004201e200860bd008400bd400420bd4088011e210800bd008800bd4004201e2008c0bd008c00d65f03c01e222080540000abbd4014231e2308031e2320a054fff2aaf9400009f940552952a8500a1e2701431e230803eb02013f540000811e2320801e2354a854fff1641e2008215280060914000004aa0a03e87100052954000440f9400d0ab400034abd4071042d4a19051e2408a71e2488a41e2020e81e274c84bd4085051e2508c71e2588c51e2020e81e274ca51e222080540000abbd4014261e2608061e2620a054fffd6af9400108f9405508eb02011f54ffedc11e2320801e2354a854fffc8417ffff6a2d460d021e2308631f020c421e2a10031e23204054ffec8cbd407c021e20c04252a879081e2701031e2308031e23204052a870e81e27010252a86cc81e2701031e22ac621e220802bd408c001e20c0031e22206054ffea8b1e2140221e2020081e22cc211e212800bd008c00d65f03c0'
++_duo_anchor = 'bd4000231e20206854000041d65f03c0f9400c08b4ffffc852800609aa0803eaf9400d4bb400008baa0b03ea7100052954ffff81bd40554052a88f491e2701211e2120001e2e10001e2f10011e20ac20bd4070012d4a14021e2108441e2188411e2020881e244c21bd4084041e2408a21e2488a51e2020481e224ca5f94014099100800abd4010221e2208021e222020540003cbbd4014261e2608061e2620a05400034bbd4018261e2608061e2620a0540002c8bd407c061e20c0c652a8440b1e2701671e2708071e2720c0540001e5bd408c061e20c0d01e27220054000165eb0a013f54fff941f9400008f9405508eb02011f54fff8c0bd400420bd4080011e2108001400001ceb0a013f540004c1bd4014261e2608061e2620a05400044b52a886891e2701261e260806bd4004271e3010101f0740c61e2620a054000345bd408c061e20c0d052a844091e2701311e3108111e31220054000265f9400009f9405529eb02013f540001e0bd4080001e2008e0bd008000bd4004201e200880bd008400bd400420bd4088011e210800bd008800bd4004201e2008c0bd008c00d65f03c01e222020540000abbd4014241e2408041e2420a054fff2aaf9400009f940552952a8500a1e2701441e240804eb02013f540000811e2420201e2454a854fff1641e2008635280060914000004aa0a03e87100052954000500f9400d0ab400034abd4071052d4a1d061e2508d01e2588c51e2022081e304ca5bd4085061e2608f01e2688e61e2022081e304cc61e2220a0540000abbd4014271e2708071e2720c054fffd6af9400108f9405508eb02011f54ffedc11e2420a01e2454c854fffc8417ffff6a2d4615041e2508a51f0414845293334872a7e3281e2701051e2508421e2220201e2a10011e21b48054ffebec140000075293334872a7e3281e2701041e2408421e22202054ffeb0abd407c011e20c02152a879081e2701021e2208021e22202052a870e81e27010152a86cc81e2701021e21ac411e210801bd408c001e20c0021e21204054ffe90b1e2140611e2020081e21cc611e212800bd008c00d65f03c0'
+ _duo_calc = 0x0
+ _pane_draw_self = 0x27e2c8   # nn::ui2d::Pane::DrawSelf (vtable main+0x474d1f8 slot 21, empty): the game's null panes, alignments, captures and parts keep it
+ _tanf_plt, _atanf_plt = 0x3f03330, 0x3f03360   # main's PLT stubs of the SDK's tanf, atanf

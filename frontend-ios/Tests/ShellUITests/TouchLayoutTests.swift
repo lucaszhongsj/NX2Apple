@@ -67,23 +67,11 @@ import Testing
                Pin(face: CGPoint(x: 837.7, y: 343.4), stick: CGPoint(x: 142.3, y: 343.4), dpad: CGPoint(x: 262.3, y: 357.8),
                    keys: pts([877.7, 343.4, 837.7, 383.4, 826.9, 281.8, 797.7, 343.4]), drops: pts([94.2, 32, 94.2, 86.4, 837.8, 32, 837.8, 86.4]),
                    moved: [.x, .plus], dropped: [.zr]), "Pro Max 2D small inward")
-        let iPad = PadScreen(size: CGSize(width: 1032, height: 1376), insets: .init(top: 24, bottom: 20))
-        expect(PadGeo.make(iPad, full: false, size: "large", layout: try #require(TouchLayout(encoded: "1;2s/face:2,-3/zr:-3,2"))),
+        let upright = PadScreen(size: CGSize(width: 1032, height: 1376), insets: .init(top: 24, bottom: 20))
+        expect(PadGeo.make(upright, full: false, size: "large", layout: try #require(TouchLayout(encoded: "1;2s/face:2,-3/zr:-3,2"))),
                Pin(face: CGPoint(x: 785.16, y: 1012.26), stick: CGPoint(x: 288.96, y: 1075.44), dpad: CGPoint(x: 418.44, y: 1075.44),
                    keys: pts([863.16, 1012.26, 785.16, 1090.26, 785.16, 934.26, 707.16, 1012.26]), drops: pts([68.64, 750.4, 68.64, 856.48, 963.36, 750.4, 963.36, 856.48]),
-                   moved: [.face], dropped: [.zr]), "iPad upright 2D large")
-        // The engine's test screens leave the Duo's topSafeOnly off: the same here.
-        let duo = PadScreen(size: CGSize(width: 669, height: 951), insets: .init(top: 62, bottom: 34), division: CGRect(x: 0, y: 455.5, width: 669, height: 40))
-        expect(PadGeo.make(duo, full: true, size: "small", layout: try #require(TouchLayout(encoded: "1;3s/stick:3,-2/a:1,0/x:0,-1"))),
-               Pin(face: CGPoint(x: 481.68, y: 739.97), stick: CGPoint(x: 146.0331, y: 739.97), dpad: CGPoint(x: 250.7794, y: 739.97),
-                   keys: pts([530.2303, 739.97, 481.68, 778.1986, 481.68, 691.4197, 443.4514, 739.97]),
-                   drops: pts([33.6411, 526.0829, 33.6411, 578.0737, 635.3589, 526.0829, 635.3589, 578.0737]), moved: [.a, .x], dropped: [.stick]), "Duo upright 3D small")
-        let tabletop = PadScreen(size: CGSize(width: 951, height: 669), insets: .init(left: 62, bottom: 20, right: 62), partiallyOpen: true,
-                                 division: CGRect(x: 0, y: 314.5, width: 951, height: 40))
-        expect(PadGeo.make(tabletop, full: true, stick: "inward", layout: try #require(TouchLayout(encoded: "1;3s/face:-6,0/dpad:4,-1/l:3,1"))),
-               Pin(face: CGPoint(x: 776.1654, y: 591.641), stick: CGPoint(x: 158.5686, y: 592.8395), dpad: CGPoint(x: 298.2849, y: 595.9215),
-                   keys: pts([810.4096, 591.641, 776.1654, 625.8852, 776.1654, 557.3968, 741.9212, 591.641]),
-                   drops: pts([92.1349, 381.8953, 119.8727, 437.7134, 858.8651, 381.8953, 858.8651, 428.4674]), moved: [.face, .dpad, .l], dropped: []), "Duo tabletop 3D inward")
+                   moved: [.face], dropped: [.zr]), "large screen upright 2D large")
         let se = PadScreen(size: CGSize(width: 667, height: 375))
         expect(PadGeo.make(se, full: true, stick: "inward", layout: try #require(TouchLayout(encoded: "1;3d/dpad:-2,-5/l3:3,3/y:-1,0"))),
                Pin(face: CGPoint(x: 596.3605, y: 303.4884), stick: CGPoint(x: 122.9651, y: 303.4884), dpad: CGPoint(x: 253.7791, y: 319.186),
@@ -92,7 +80,7 @@ import Testing
     }
 
     /// No arrangement, or a reset one, is the built-in geometry exactly.
-    @Test(arguments: [PadScreen.proMax, .iPadUpright, .duoUpright])
+    @Test(arguments: [PadScreen.proMax, PadScreen(size: CGSize(width: 1032, height: 1376), insets: .init(top: 24, bottom: 20))])
     func aResetLayoutIsTheBuiltInOne(screen: PadScreen) {
         var l = TouchLayout()
         l[.threeD, .stick] = Offset(dx: 2, dy: -2); l[.threeDSplit, .face] = Offset(dx: -2, dy: 0)
@@ -178,12 +166,10 @@ import Testing
     }
 
     @Test func theDeviceScreensFollowTheWindow() {
-        let phone = TouchLayoutScreens.device(window: CGSize(width: 440, height: 956), insets: EdgeInsetsLike.portrait, isPad: false)
+        let phone = TouchLayoutScreens.device(window: CGSize(width: 440, height: 956), insets: EdgeInsetsLike.portrait)
         #expect(phone.sideways.size == CGSize(width: 956, height: 440) && phone.sideways.insets.left == 62 && phone.upright == nil)
-        let pad = TouchLayoutScreens.device(window: CGSize(width: 1376, height: 1032), insets: .init(), isPad: true)
-        #expect(pad.sideways.size.width == 1376 && pad.upright?.size == CGSize(width: 1032, height: 1376))
-        let duo = TouchLayoutScreens.device(window: CGSize(width: 669, height: 951), insets: .init(top: 62, leading: 0, bottom: 34, trailing: 0), isPad: false)
-        #expect(duo.upright?.topSafeOnly == true && duo.upright?.division != nil)
+        let lyingDown = TouchLayoutScreens.device(window: CGSize(width: 956, height: 440), insets: EdgeInsetsLike.portrait)
+        #expect(lyingDown.sideways.size == CGSize(width: 956, height: 440) && lyingDown.sideways.insets.top == 0 && lyingDown.upright == nil)
     }
 
     /// Xcode 26.6 Release builds time out type-checking when the 14-modifier chain and two inline ternaries sit inside the ForEach closure.

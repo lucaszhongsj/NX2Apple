@@ -8,12 +8,10 @@ enum RecentRow {
 }
 
 enum PortraitScrollDecoration: Equatable {
-    case fade(CGFloat)
     case pullDown(CGFloat)
     case inactive
 
-    static func value(offset: CGFloat, tabletop: Bool, includesHero: Bool) -> Self {
-        if tabletop { return .fade(min(1, max(0, offset / 48))) }
+    static func value(offset: CGFloat, includesHero: Bool) -> Self {
         if includesHero { return .pullDown(max(0, -offset)) }
         return .inactive
     }
@@ -21,8 +19,8 @@ enum PortraitScrollDecoration: Equatable {
 
 /// The library when it is taller than it is wide: the chosen game's banner as the hero with the title under it,
 /// then the collection, then recently played. In one column the primary action sits at the bottom for the thumb.
-/// With regular width (an iPad or an unfolded foldable held upright) the collection becomes a grid of wide cards and
-/// the primary action remains at the bottom. Settings themselves only appear when asked for.
+/// With regular width the collection becomes a grid of wide cards and the primary action remains at the bottom.
+/// Settings themselves only appear when asked for.
 struct PortraitLibrary: View, Equatable {
     @Environment(\.shellNativeBars) private var nativeBars
     let games: [GameDetail]
@@ -43,11 +41,9 @@ struct PortraitLibrary: View, Equatable {
     @Namespace private var actionGlassNamespace
     @Namespace private var poseNamespace
     @State private var rowID: String?
-    @State private var tabletop = false
     @State private var heroCollapsed = false
     @State private var heroExpansionArmed = false
     @State private var scrolling = false
-    @State private var gridFade: CGFloat = 0
     @State private var heroPullDown: CGFloat = 0
     @State private var expandedScrollInset: CGFloat?
     @State private var heroCanCollapse = false
@@ -56,8 +52,7 @@ struct PortraitLibrary: View, Equatable {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var typeSize
 
-    /// A short screen (the folded foldable is about 1.4:1) gets a smaller hero and smaller covers, so the hero,
-    /// the row and Play all fit without scrolling.
+    /// A short screen gets a smaller hero and smaller covers, so the hero, the row and Play all fit without scrolling.
     private var short: Bool { size.height + topInset < 700 }
     /// One height for the hero per layout, a little under half the screen, so "Your games" sits high.
     private var heroHeight: CGFloat {
@@ -89,19 +84,7 @@ struct PortraitLibrary: View, Equatable {
         GlassEffectContainer(spacing: 12) {
             ScrollViewReader { proxy in
                 Group {
-                    if #available(iOS 27.1, macOS 27.1, *), tabletop {
-                        ArrangementView {
-                            VStack(spacing: 0) {
-                                tabletopHero
-                                gridHeading
-                            }
-                        } secondary: {
-                            gameScroll(includesHero: false)
-                                .safeAreaBar(edge: .bottom, spacing: 0) { bottomBar }
-                        }
-                        .arrangementViewStyle(.split.axes(.vertical))
-                        .background(Color.black)
-                    } else if expanded {
+                    if expanded {
                         // Resize the scroll viewport with the hero so newly exposed tiles also receive touches.
                         VStack(spacing: 0) {
                             expandedHero
@@ -116,15 +99,7 @@ struct PortraitLibrary: View, Equatable {
                             .safeAreaBar(edge: .bottom, spacing: 0) { bottomBar }
                     }
                 }
-                .ignoresSafeArea(edges: tabletop ? [.bottom] : wide ? [.top, .bottom] : [.top, .leading, .trailing])
-                .onGeometryChange(for: Bool.self) { geometry in
-                    if #available(iOS 27.1, macOS 27.1, *) {
-                        return ShellLayout.divisionAxis(geometry.reservedRegions(kind: .division).first?.frame, in: geometry.size) == .horizontal
-                    }
-                    return false
-                } action: { newValue in
-                    withAnimation(reduceMotion ? nil : .smooth(duration: 0.35)) { tabletop = newValue }
-                }
+                .ignoresSafeArea(edges: wide ? [.top, .bottom] : [.top, .leading, .trailing])
                 .overlay(alignment: .topTrailing) {
                     if !nativeBars {
                         HStack(spacing: 10) {
@@ -143,25 +118,6 @@ struct PortraitLibrary: View, Equatable {
                 }
             }
         }
-    }
-
-    private var tabletopHero: some View {
-        GeometryReader { geometry in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    HeroText(status: selected.game.state, title: selected.game.title,
-                             explanation: selected.game.state == .playable ? "" : selected.game.state.explanation,
-                             titleSize: 40,
-                             recentlyPlayed: selected.game.recentlyPlayed ?? "")
-                        .modifier(ShellSelectionTransition(value: selected.id))
-                        .matchedGeometryEffect(id: "hero.details", in: poseNamespace, properties: .position)
-                }
-                .padding(24)
-                .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .bottomLeading)
-            }
-            .scrollIndicators(.hidden)
-        }
-        .background { PortraitHeroBackdrop(game: selected.game).ignoresSafeArea(.container, edges: .top) }
     }
 
     private var expandedHero: some View {
@@ -185,7 +141,7 @@ struct PortraitLibrary: View, Equatable {
     }
 
     private func hero(height: CGFloat, compact: CGFloat, fillsRegion: Bool = false) -> some View {
-        HeroView(game: selected.game, width: size.width, topInset: tabletop ? 0 : topInset, height: height,
+        HeroView(game: selected.game, width: size.width, topInset: topInset, height: height,
                  titleSize: wide ? 34 - compact * 6 : short ? 24 : 32, short: short,
                  topSpacing: 60 - compact * 48,
                  coverSide: 96 - compact * 24, fillsRegion: fillsRegion,
@@ -208,33 +164,18 @@ struct PortraitLibrary: View, Equatable {
         .scrollIndicators(.hidden)
         .background { Color.black.ignoresSafeArea() }
         .scrollEdgeEffectStyle(.soft, for: .top)
-        .scrollEdgeEffectHidden(tabletop || !expanded, for: .top)
+        .scrollEdgeEffectHidden(!expanded, for: .top)
         .accessibilityIdentifier("library.grid")
-        .overlay(alignment: .top) {
-            if tabletop {
-                LinearGradient(stops: [.init(color: .black, location: 0),
-                                       .init(color: .black.opacity(0.75), location: 0.22),
-                                       .init(color: .black.opacity(0.25), location: 0.62),
-                                       .init(color: .clear, location: 1)],
-                               startPoint: .top, endPoint: .bottom)
-                    .frame(height: 28)
-                    .opacity(gridFade)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
-        }
         .onScrollGeometryChange(for: PortraitScrollDecoration.self) {
-            PortraitScrollDecoration.value(offset: $0.contentOffset.y + $0.contentInsets.top,
-                                           tabletop: tabletop, includesHero: includesHero)
+            PortraitScrollDecoration.value(offset: $0.contentOffset.y + $0.contentInsets.top, includesHero: includesHero)
         } action: { _, decoration in
             switch decoration {
-            case .fade(let opacity): gridFade = opacity
             case .pullDown(let distance): heroPullDown = distance
-            case .inactive: gridFade = 0; heroPullDown = 0
+            case .inactive: heroPullDown = 0
             }
         }
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { oldOffset, offset in
-            guard expanded, !tabletop, scrolling, collapseDistance > 0,
+            guard expanded, scrolling, collapseDistance > 0,
                   let expandedScrollInset else { return }
             let travel = offset + expandedScrollInset
             if !heroCollapsed, heroCanCollapse, travel >= 48 {
@@ -245,7 +186,7 @@ struct PortraitLibrary: View, Equatable {
             }
         }
         .onScrollPhaseChange { _, phase, context in
-            if !tabletop && phase == .interacting {
+            if phase == .interacting {
                 // A new reverse gesture can restore the hero; its own resize cannot retrigger expansion.
                 heroExpansionArmed = heroCollapsed
                 if expanded, !heroCollapsed {
@@ -263,7 +204,6 @@ struct PortraitLibrary: View, Equatable {
         }
         .onChange(of: topInset) { _, _ in resetHeroGeometry() }
         .onChange(of: typeSize) { _, _ in resetHeroGeometry() }
-        .onChange(of: tabletop) { _, _ in resetHeroGeometry() }
     }
 
     private func resetHeroGeometry() {
@@ -287,14 +227,12 @@ struct PortraitLibrary: View, Equatable {
         .accessibilityIdentifier("library.heading")
         .matchedGeometryEffect(id: "library.heading", in: poseNamespace, properties: .position)
         .background {
-            if !tabletop {
-                LinearGradient(stops: [.init(color: .black, location: 0),
-                                       .init(color: .black, location: 0.55),
-                                       .init(color: .clear, location: 1)],
-                               startPoint: .top, endPoint: .bottom)
-                    .padding(.bottom, -12)
-                    .allowsHitTesting(false)
-            }
+            LinearGradient(stops: [.init(color: .black, location: 0),
+                                   .init(color: .black, location: 0.55),
+                                   .init(color: .clear, location: 1)],
+                           startPoint: .top, endPoint: .bottom)
+                .padding(.bottom, -12)
+                .allowsHitTesting(false)
         }
     }
 
@@ -316,14 +254,14 @@ struct PortraitLibrary: View, Equatable {
                 .scrollIndicators(.hidden)
                 .scrollTargetBehavior(.viewAligned)
                 .scrollPosition(id: $rowID, anchor: .center)
-                // A game chosen elsewhere (at launch, in Recently played, after a fold) comes into view.
+                // A game chosen elsewhere (at launch, in Recently played) comes into view.
                 .onAppear { rowID = selected.id }
                 .onChange(of: selected.id) { _, id in
                     withAnimation(reduceMotion ? nil : .smooth(duration: 0.3)) { rowID = id }
                 }
                 // A scroll view draws under the safe-area insets, but the covers are sized for the width inside them.
-                // Where the system keeps a strip at the side (the iPhone Duo's outer screen, #511) the next card would
-                // show there, cut at the screen edge. Clipped to its frame the edge falls between cards again.
+                // A strip the system keeps at the side would show the next card there, cut at the screen edge.
+                // Clipped to its frame the edge falls between cards again.
                 .clipped()
                 .padding(.vertical, -6)
             }

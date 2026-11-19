@@ -49,14 +49,11 @@ struct TouchLayoutEditorView: View {
             let windowSize = CGSize(width: proxy.size.width + contentInsets.leading + contentInsets.trailing,
                                     height: proxy.size.height + contentInsets.top + contentInsets.bottom)
 #if os(iOS)
-            let isPad = UIDevice.current.userInterfaceIdiom == .pad
             // Size from the current container; feeding the last probe size back can pin the old orientation.
             let canvasSize = windowSize
 #else
-            let division = reservedDivision(in: proxy)?.offsetBy(dx: contentInsets.leading, dy: contentInsets.top)
             let actualScreen = TouchLayoutGeometrySnapshot(bounds: CGRect(origin: .zero, size: windowSize),
-                safeAreaInsets: .init(top: contentInsets.top, left: contentInsets.leading, bottom: contentInsets.bottom, right: contentInsets.trailing),
-                division: division, hingeStatus: nil).screen
+                safeAreaInsets: .init(top: contentInsets.top, left: contentInsets.leading, bottom: contentInsets.bottom, right: contentInsets.trailing)).screen
             let canvasSize = windowSize
 #endif
             ZStack(alignment: .topLeading) {
@@ -76,7 +73,7 @@ struct TouchLayoutEditorView: View {
             }
             .onChange(of: liveGeometry, initial: true) { _, geometry in
                 guard let geometry else { return }
-                let context = Self.editorContext(geometry: geometry, isPad: isPad)
+                let context = Self.editorContext(geometry: geometry)
                 phonePortraitFallback = context.phonePortraitFallback
                 model.updateScreen(context.screen)
                 drag = nil
@@ -178,42 +175,24 @@ struct TouchLayoutEditorView: View {
         }
     }
 
-    private func reservedDivision(in proxy: GeometryProxy) -> CGRect? {
-        #if os(iOS)
-        if #available(iOS 27.1, *) { return proxy.reservedRegions(kind: .division).first?.frame }
-        #endif
-        return nil
-    }
-
     struct EditorContext {
         var screen: PadScreen
         var phonePortraitFallback: Bool
     }
 
-    static func editorContext(geometry: TouchLayoutGeometrySnapshot, isPad: Bool) -> EditorContext {
+    static func editorContext(geometry: TouchLayoutGeometrySnapshot) -> EditorContext {
         let screen = geometry.screen
-        let hingeKnown = geometry.hingeStatus.map { $0 != .unknown } ?? false
-        let foldContext = geometry.hingeStatus != .closed && (hingeKnown || geometry.division != nil)
-        let portraitPhone = !isPad && screen.size.height > screen.size.width && !foldContext
-        guard portraitPhone else { return EditorContext(screen: screen, phonePortraitFallback: false) }
+        guard screen.size.height > screen.size.width else { return EditorContext(screen: screen, phonePortraitFallback: false) }
 
         let insets = EdgeInsets(top: geometry.safeAreaInsets.top, leading: geometry.safeAreaInsets.left,
                                 bottom: geometry.safeAreaInsets.bottom, trailing: geometry.safeAreaInsets.right)
-        let fallback = TouchLayoutScreens.device(window: geometry.bounds.size, insets: insets, isPad: false).sideways
+        let fallback = TouchLayoutScreens.device(window: geometry.bounds.size, insets: insets).sideways
         return EditorContext(screen: fallback, phonePortraitFallback: true)
     }
 
-    private var liveHingeStatus: TouchLayoutGeometrySnapshot.HingeStatus? {
-        #if os(iOS)
-        liveGeometry?.hingeStatus
-        #else
-        nil
-        #endif
-    }
-
-    static func layoutTitle(screen: PadScreen, hingeStatus: TouchLayoutGeometrySnapshot.HingeStatus?) -> String {
+    static func layoutTitle(screen: PadScreen) -> String {
         if screen.size.height > screen.size.width { return ShellStrings.text("Portrait") }
-        return ShellStrings.text(hingeStatus == .closed ? "Landscape (Duo outer screen)" : "Landscape")
+        return ShellStrings.text("Landscape")
     }
 
     private var optionsPopover: some View {
@@ -227,9 +206,9 @@ struct TouchLayoutEditorView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text(Self.layoutTitle(screen: screen, hingeStatus: liveHingeStatus)).font(.headline)
+                    Text(Self.layoutTitle(screen: screen)).font(.headline)
                         .accessibilityIdentifier("touchLayout.orientation")
-                    Text(ShellStrings.text(model.kind.split ? "Positions are saved for portrait and tabletop controls." : "Positions are shared across landscape views."))
+                    Text(ShellStrings.text(model.kind.split ? "Positions are saved for portrait controls." : "Positions are shared across landscape views."))
                         .font(.footnote).foregroundStyle(.secondary)
                     NativeChoiceControl(row: sizeRow, targetPrefix: "lay.row.") { model.setSize($0) }
                     NativeChoiceControl(row: layoutChoiceRow, targetPrefix: "lay.row.") { value in
@@ -322,16 +301,6 @@ struct TouchLayoutEditorView: View {
 
     private func selectionToolsPosition(for selected: TouchLayout.Control, box: CGRect, bounds: CGRect,
                                         canvasSize: CGSize, scale: CGFloat) -> CGPoint {
-        var bounds = bounds
-        if let division = screen.division, division.height > division.width, division.intersects(bounds) {
-            if box.midX < division.midX {
-                bounds.size.width = max(0, min(bounds.maxX, division.minX) - bounds.minX)
-            } else {
-                let right = bounds.maxX
-                bounds.origin.x = max(bounds.minX, division.maxX)
-                bounds.size.width = max(0, right - bounds.minX)
-            }
-        }
         let toolbarWidth = selectedToolbarWidth(for: selected)
         let halfWidth = toolbarWidth / 2, halfHeight = 30.0
         let minX = bounds.minX * scale + halfWidth, maxX = bounds.maxX * scale - halfWidth

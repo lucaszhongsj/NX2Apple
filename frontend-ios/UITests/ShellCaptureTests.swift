@@ -147,19 +147,4 @@ import XCTest
         XCUIDevice.shared.orientation = .portrait
     }
 
-    /// The fold stand-in: one running shell resized between a folded and an unfolded screen.
-    func testCaptureFold() throws {
-        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "The fold stand-in needs an iPad canvas")
-        for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
-            XCUIDevice.shared.orientation = orientation
-            let suffix = orientation == .portrait ? "portrait" : "landscape"
-            for screen in ["library", "settings", "needs-data", "controllers"] {
-                launch(["--screen", screen, "--fold-test"])
-                shot("fold-\(screen)-folded-\(suffix)")
-                launch(["--screen", screen, "--fold-test", "--unfolded"])
-                shot("fold-\(screen)-unfolded-\(suffix)")
-            }
-        }
-        XCUIDevice.shared.orientation = .portrait
-    }
 }

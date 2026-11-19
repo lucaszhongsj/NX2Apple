@@ -19,8 +19,6 @@ struct CoverFlowView: View, Equatable {
     let openControllers: () -> Void
     let openShellSettings: () -> Void
     @State private var centredID: String?
-    @State private var division: CGRect?
-    private var divided: Bool { division != nil }
     /// How far the carousel is scrolled: 0 with the first card in the middle.
     @State private var scrolled: CGFloat = 0
     /// True from the first touch of a scroll until it has settled.
@@ -41,13 +39,6 @@ struct CoverFlowView: View, Equatable {
     var body: some View {
         GeometryReader { geometry in
             flow(size: geometry.size)
-                .onGeometryChange(for: CGRect?.self) { proxy in
-                    if #available(iOS 27.1, macOS 27.1, *) {
-                        let region = proxy.reservedRegions(kind: .division).first?.frame
-                        return ShellLayout.divisionAxis(region, in: proxy.size) == .vertical ? region : nil
-                    }
-                    return nil
-                } action: { division = $0 }
         }
         .ignoresSafeArea(.container)
         .sensoryFeedback(.selection, trigger: selected.id)
@@ -63,27 +54,24 @@ struct CoverFlowView: View, Equatable {
 
     @ViewBuilder private func flow(size: CGSize) -> some View {
         let short = size.height < 520
-        // Keep the focused card in the leading usable region when a division is active.
         let height = size.height
-        let primaryWidth = division?.minX ?? size.width
         let gap: CGFloat = short ? 10 : 24
         let words = Self.infoHeight(short: short)
         let footer: CGFloat = short ? 36 : 56
         let bar = nativeBars ? 0 : Self.barTop(short: short) + Self.barHeight
-        // Use the same usable half-width in both inner-display poses; folding only changes the anchor.
         let artworkWidth = short ? size.width * 0.64 : max(0, size.width / 2 - 48)
         let cardHeight = max(90, min(artworkWidth * 9 / 16, height - words - gap - footer - bar - 32) / 1.06)
         let cover = cardHeight * 16 / 9
         ZStack(alignment: .top) {
             VStack(spacing: gap) {
-                carousel(width: size.width, cover: cover, primaryWidth: primaryWidth)
+                carousel(width: size.width, cover: cover)
                     .frame(height: cardHeight * 1.06)
-                info(short: short, width: primaryWidth)
-                    .frame(width: size.width, alignment: divided ? .leading : .center)
+                info(short: short, width: size.width)
+                    .frame(width: size.width)
             }
             .overlay(alignment: .bottom) {
-                launchActions(width: primaryWidth)
-                    .frame(width: size.width, alignment: divided ? .leading : .center)
+                launchActions(width: size.width)
+                    .frame(width: size.width)
                     .alignmentGuide(.bottom) { $0[.top] - gap }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -91,13 +79,13 @@ struct CoverFlowView: View, Equatable {
         }
         .overlay(alignment: .bottom) {
             // Hints stay outside the centered cover row without shifting its midpoint.
-            if nativeBars || divided || !short {
+            if nativeBars || !short {
                 hints
                     .opacity(showsHints ? 1 : 0)
-                    .frame(width: divided ? max(0, primaryWidth - 48) : max(0, size.width - 48))
+                    .frame(width: max(0, size.width - 48))
                     .padding(.horizontal, 24)
                     .padding(.vertical, short ? 4 : 12)
-                    .frame(maxWidth: .infinity, alignment: divided ? .leading : .center)
+                    .frame(maxWidth: .infinity)
                     .allowsHitTesting(false)
             }
         }
@@ -139,11 +127,11 @@ struct CoverFlowView: View, Equatable {
 
     /// One native snapping carousel, with the neighbours turned back a little and
     /// tucked behind the middle card, a deck rather than a row.
-    private func carousel(width: CGFloat, cover: CGFloat, primaryWidth: CGFloat) -> some View {
+    private func carousel(width: CGFloat, cover: CGFloat) -> some View {
         let spacing = cover * 0.04
         let stride = cover + spacing
-        let margin = max(0, (primaryWidth - cover) / 2)
-        let anchor: UnitPoint = divided ? .leading : .center
+        let margin = max(0, (width - cover) / 2)
+        let anchor: UnitPoint = .center
         return ScrollView(.horizontal) {
             LazyHStack(spacing: spacing) {
                 ForEach(Array(games.enumerated()), id: \.element.id) { index, detail in
@@ -224,37 +212,37 @@ struct CoverFlowView: View, Equatable {
     @ViewBuilder private func info(short: Bool, width: CGFloat) -> some View {
         let game = selected.game
         let size: CGFloat = short ? 18 : 28
-        VStack(alignment: divided ? .leading : .center, spacing: short ? 16 : 24) {
-            ZStack(alignment: divided ? .leading : .center) {
-                VStack(alignment: divided ? .leading : .center, spacing: short ? 6 : 10) {
+        VStack(alignment: .center, spacing: short ? 16 : 24) {
+            ZStack(alignment: .center) {
+                VStack(alignment: .center, spacing: short ? 6 : 10) {
                     if game.state.artworkWarning == nil {
                         StatusLabel(state: game.state, prominent: true)
                     }
                     Text(game.title).shellType(ShellType.flowTitle(size))
                         .lineLimit(2).truncationMode(.tail)
-                        .multilineTextAlignment(divided ? .leading : .center)
+                        .multilineTextAlignment(.center)
                         .shadow(color: .black.opacity(0.35), radius: 10)
                         .accessibilityAddTraits(.isHeader).accessibilityIdentifier("hero.title")
                     if game.state != .playable, !game.state.explanation.isEmpty {
                         Text(game.state.explanation).shellType(ShellType.body)
                             .foregroundStyle(.white.opacity(0.78)).lineLimit(2)
-                            .multilineTextAlignment(divided ? .leading : .center)
+                            .multilineTextAlignment(.center)
                     }
                 }
                 .modifier(ShellSelectionTransition(value: game.id, duration: 0.16))
             }
 
         }
-        .frame(maxWidth: max(0, min(560, width - 48)), alignment: divided ? .leading : .center)
+        .frame(maxWidth: max(0, min(560, width - 48)))
         .padding(.horizontal, 24)
         .dynamicTypeSize(...(short ? DynamicTypeSize.xxLarge : DynamicTypeSize.accessibility1))
     }
 
     private func launchActions(width: CGFloat) -> some View {
         let game = selected.game
-        return ZStack(alignment: divided ? .leading : .center) {
+        return ZStack(alignment: .center) {
                 let actions = GameLaunchActions(game: game, primary: { primary(selected) }, settings: openSettings,
-                                                alignment: divided ? .leading : .center, transitionDuration: 0.18)
+                                                alignment: .center, transitionDuration: 0.18)
                 if obscured { actions.hidden() } else { actions }
             }
             .frame(maxWidth: max(0, min(560, width - 48)))

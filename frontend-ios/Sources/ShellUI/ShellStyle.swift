@@ -91,7 +91,7 @@ struct TypeRole {
 ///
 /// | Role | Mac | iOS |
 /// | --- | --- | --- |
-/// | Hero title | heavy, up to 68, tracking -1.6 | heavy 32 (24 folded, 34 iPad), -0.024 per pt |
+/// | Hero title | heavy, up to 68, tracking -1.6 | heavy 32 (24 on a short screen, 34 wide), -0.024 per pt |
 /// | Cover Flow title | console title, bold 36, -1.6 | bold 28 (20 on a phone on its side) |
 /// | Page title (settings, controllers) | heavy 26, -0.6 | heavy 26, -0.6 |
 /// | Section capitals | console label, semibold 14, tracking 2 | semibold 11.5, tracking 1.6 |

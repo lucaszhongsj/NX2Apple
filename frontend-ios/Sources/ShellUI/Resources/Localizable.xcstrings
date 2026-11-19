@@ -9345,70 +9345,6 @@
         }
       }
     },
-    "Landscape (Duo outer screen)": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Querformat (Duo-Außendisplay)"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Landscape (Duo outer screen)"
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Horizontal (pantalla exterior del Duo)"
-          }
-        },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Paysage (écran externe Duo)"
-          }
-        },
-        "it": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Orizzontale (schermo esterno Duo)"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "横向き（Duo の外側画面）"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "가로 (Duo 바깥 화면)"
-          }
-        },
-        "pt-BR": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Horizontal (tela externa do Duo)"
-          }
-        },
-        "sv": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Liggande (Duos yttre skärm)"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "横屏（Duo 外屏）"
-          }
-        }
-      }
-    },
     "Large": {
       "localizations": {
         "de": {
@@ -13825,66 +13761,66 @@
         }
       }
     },
-    "Positions are saved for portrait and tabletop controls.": {
+    "Positions are saved for portrait controls.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Positionen werden für Hochformat- und Tischmodus-Steuerung gespeichert."
+            "value": "Positionen werden für die Steuerung im Hochformat gespeichert."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Positions are saved for portrait and tabletop controls."
+            "value": "Positions are saved for portrait controls."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Las posiciones se guardan para los controles verticales y de sobremesa."
+            "value": "Las posiciones se guardan para los controles en vertical."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Les positions sont enregistrées pour les commandes en portrait et en mode posé."
+            "value": "Les positions sont enregistrées pour les commandes en portrait."
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "Le posizioni vengono salvate per i controlli verticali e in modalità da tavolo."
+            "value": "Le posizioni vengono salvate per i controlli in verticale."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "配置は縦向きとテーブルトップのコントロール用に保存されます。"
+            "value": "配置は縦向きのコントロール用に保存されます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "위치는 세로 및 탁상 모드 컨트롤용으로 저장됩니다."
+            "value": "위치는 세로 화면 컨트롤용으로 저장됩니다."
           }
         },
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
-            "value": "As posições são salvas para os controles vertical e de mesa."
+            "value": "As posições são salvas para os controles na vertical."
           }
         },
         "sv": {
           "stringUnit": {
             "state": "translated",
-            "value": "Positionerna sparas för stående kontroller och bordsläge."
+            "value": "Positionerna sparas för kontrollerna i stående läge."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "位置将保存用于竖屏和桌面模式的触控。"
+            "value": "位置将保存用于竖屏触控。"
           }
         }
       }

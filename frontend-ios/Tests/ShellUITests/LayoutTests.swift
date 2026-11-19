@@ -17,9 +17,8 @@ final class LayoutTests: XCTestCase {
         XCTAssertEqual(layout(507, 834), .column)
         XCTAssertEqual(layout(375, 688), .column)
     }
-    /// The foldable as reported so far: both screens about 1.4:1, the outer compact, the inner regular.
-    /// These are sample sizes, not values the views know about.
-    func testFoldable() {
+    /// Windows of other large sizes: the same rules as above, on sample sizes the views do not know about.
+    func testLargeWindows() {
         XCTAssertEqual(layout(375, 525), .column)
         XCTAssertEqual(layout(525, 375), .coverFlow(regular: false))
         XCTAssertEqual(layout(626, 890), .grid)
@@ -85,25 +84,5 @@ final class ChoicePresentationTests: XCTestCase {
         XCTAssertEqual(ShellLayout.collapseProgress(expanded: 400, minimum: 240, travel: 80), 0.5)
         XCTAssertEqual(ShellLayout.collapseProgress(expanded: 400, minimum: 240, travel: 1000), 1)
         XCTAssertEqual(ShellLayout.collapseProgress(expanded: 200, minimum: 240, travel: 80), 1)
-    }
-    func testOnlyActiveIntersectingDivisionChoosesAnArrangementAxis() {
-        let size = CGSize(width: 900, height: 620)
-        XCTAssertNil(ShellLayout.divisionAxis(nil, in: size))
-        XCTAssertNil(ShellLayout.divisionAxis(CGRect(x: 1000, y: 0, width: 20, height: 620), in: size))
-        XCTAssertEqual(ShellLayout.divisionAxis(CGRect(x: 430, y: 0, width: 40, height: 620), in: size), .vertical)
-        XCTAssertEqual(ShellLayout.divisionAxis(CGRect(x: 0, y: 290, width: 900, height: 40), in: size), .horizontal)
-    }
-
-    func testFlatAndUnrelatedDivisionsKeepTheContentWidth() {
-        XCTAssertEqual(GameLaunchActions.insets(size: CGSize(width: 560, height: 58), division: nil), EdgeInsets())
-        XCTAssertEqual(GameLaunchActions.insets(size: CGSize(width: 560, height: 58), division: CGRect(x: 700, y: -200, width: 40, height: 900)), EdgeInsets())
-        XCTAssertEqual(GameLaunchActions.insets(size: CGSize(width: 560, height: 58), division: CGRect(x: 0, y: -100, width: 560, height: 40)), EdgeInsets())
-    }
-    func testActiveVerticalDivisionKeepsTheWholeRowOnOneSide() {
-        let size = CGSize(width: 560, height: 58)
-        let middle = GameLaunchActions.insets(size: size, division: CGRect(x: 260, y: -300, width: 40, height: 900))
-        XCTAssertEqual(middle, EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 300))
-        let left = GameLaunchActions.insets(size: size, division: CGRect(x: 100, y: -300, width: 40, height: 900))
-        XCTAssertEqual(left, EdgeInsets(top: 0, leading: 140, bottom: 0, trailing: 0))
     }
 }

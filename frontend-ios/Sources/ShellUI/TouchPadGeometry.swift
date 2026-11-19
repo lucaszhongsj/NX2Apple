@@ -1,8 +1,7 @@
 import CoreGraphics
 import Foundation
 
-/// A screen the touch controls are laid out on, as the engine sees it: the game view's size in points, its safe-area insets and,
-/// on a foldable, the fold.
+/// A screen the touch controls are laid out on, as the engine sees it: the game view's size in points and its safe-area insets.
 public struct PadScreen: Equatable, Sendable {
     public struct Insets: Equatable, Sendable {
         public var top: CGFloat, left: CGFloat, bottom: CGFloat, right: CGFloat
@@ -12,26 +11,13 @@ public struct PadScreen: Equatable, Sendable {
     }
     public var size: CGSize
     public var insets: Insets
-    public var partiallyOpen = false
-    /// The fold (a division region), nil for none.
-    public var division: CGRect?
-    /// iPhone Duo's inner display upright: the picture keeps only the top inset (front_ios.m's duoPortrait).
-    public var topSafeOnly = false
-    /// Only custom controls on Duo outer landscape may extend beyond safe insets.
-    public var customControlsFullBounds = false
 
-    public init(size: CGSize, insets: Insets = Insets(), partiallyOpen: Bool = false, division: CGRect? = nil, topSafeOnly: Bool = false, customControlsFullBounds: Bool = false) {
-        self.size = size; self.insets = insets; self.partiallyOpen = partiallyOpen; self.division = division; self.topSafeOnly = topSafeOnly
-        self.customControlsFullBounds = customControlsFullBounds
+    public init(size: CGSize, insets: Insets = Insets()) {
+        self.size = size; self.insets = insets
     }
 
     /// iPhone Pro Max held sideways, the screen the settings preview has always shown.
     public static let proMax = PadScreen(size: CGSize(width: 932, height: 430), insets: Insets(left: 59, bottom: 21, right: 59))
-    /// iPad Pro 13 inch upright: the controls below the picture.
-    public static let iPadUpright = PadScreen(size: CGSize(width: 1032, height: 1376), insets: Insets(top: 24, bottom: 20))
-    /// iPhone Duo's inner display upright, with the fold across the middle.
-    public static let duoUpright = PadScreen(size: CGSize(width: 669, height: 951), insets: Insets(top: 62, bottom: 34),
-                                             division: CGRect(x: 0, y: 455.5, width: 669, height: 40), topSafeOnly: true)
 }
 
 /// The touch controls' geometry, a Swift copy of the engine's `DmPadGeometry.h` (patches 0065 to 0067 and the arrangement of
@@ -40,7 +26,7 @@ public struct PadScreen: Equatable, Sendable {
 /// test program computes. The engine stays the truth on the device.
 struct PadGeo: Equatable {
     // dm_layout: the overlay layout, or the split one with the controls below the picture.
-    struct Region: Equatable { var game: CGRect, controls: CGRect, separated: Bool, topSafeOnly: Bool }
+    struct Region: Equatable { var game: CGRect, controls: CGRect, separated: Bool }
 
     struct Shape: Equatable {
         var c: CGPoint
@@ -59,7 +45,6 @@ struct PadGeo: Equatable {
 
     var u: CGFloat = 0
     var safe: CGRect = .null, corner: CGRect = .null
-    var customBounds: CGRect?
     var portrait = false
     var face: CGPoint = .zero, faceGap: CGFloat = 0, faceR: CGFloat = 0, faceHitR: CGFloat = 0
     var stick: CGPoint = .zero, stickR: CGFloat = 0, knobR: CGFloat = 0
@@ -72,7 +57,7 @@ struct PadGeo: Equatable {
     var faceSplit = false
     var moved: Set<TouchLayout.Control> = [], dropped: Set<TouchLayout.Control> = []
     var full = false
-    var region = Region(game: .zero, controls: .zero, separated: false, topSafeOnly: false)
+    var region = Region(game: .zero, controls: .zero, separated: false)
 
     /// A quarter of a face key's width: one step of the arrangement.
     var step: CGFloat { faceR / 2 }
@@ -85,28 +70,15 @@ struct PadGeo: Equatable {
         if w / h > 16.0 / 9.0 { w = h * 16.0 / 9.0 } else { h = w * 9.0 / 16.0 }
         return CGRect(x: floor(b.midX - w / 2), y: floor(b.midY - h / 2), width: w, height: h)
     }
-    static func horizontalDivision(_ b: CGRect, _ division: CGRect?) -> CGRect? {
-        guard let d = division, !d.isNull, d.width > d.height else { return nil }
-        let x = max(b.minX, d.minX), y = max(b.minY, d.minY), right = min(b.maxX, d.maxX), bottom = min(b.maxY, d.maxY)
-        if right - x < b.width * 0.9 || bottom < y || y <= b.minY || bottom >= b.maxY { return nil }
-        return CGRect(x: x, y: y, width: right - x, height: bottom - y)
-    }
     static func inset(_ r: CGRect, _ i: PadScreen.Insets) -> CGRect {
         CGRect(x: r.minX + i.left, y: r.minY + i.top, width: r.width - i.left - i.right, height: r.height - i.top - i.bottom)
     }
-    static func gameSafeInsets(_ b: CGRect, _ i: PadScreen.Insets, _ duo: Bool) -> PadScreen.Insets {
-        duo && b.height > b.width ? PadScreen.Insets(top: i.top) : i
-    }
     static func region(_ screen: PadScreen) -> Region {
         let b = CGRect(origin: .zero, size: screen.size)
-        let insets = gameSafeInsets(b, screen.insets, screen.topSafeOnly)
-        var l = Region(game: aspectFit(b), controls: b, separated: false, topSafeOnly: screen.topSafeOnly)
-        if b.isEmpty { return l }
-        let division = horizontalDivision(b, screen.division)
-        let portrait = b.height > b.width
-        if !portrait && (!screen.partiallyOpen || division == nil) { return l }
-        let d = division ?? CGRect(x: b.minX, y: b.midY, width: b.width, height: 0)
-        let safe = inset(b, insets)
+        var l = Region(game: aspectFit(b), controls: b, separated: false)
+        if b.isEmpty || b.height <= b.width { return l }
+        let d = CGRect(x: b.minX, y: b.midY, width: b.width, height: 0)
+        let safe = inset(b, screen.insets)
         let upper = CGRect(x: safe.minX, y: safe.minY, width: safe.width, height: d.minY - safe.minY)
         let lower = CGRect(x: b.minX, y: d.maxY, width: b.width, height: b.maxY - d.maxY)
         if upper.height <= 0 || safe.maxY <= lower.minY { return l }
@@ -126,7 +98,7 @@ struct PadGeo: Equatable {
         var g = PadGeo()
         let sep = region.separated
         g.u = u; g.full = full; g.region = region
-        g.safe = region.controls.intersection(inset(bounds, gameSafeInsets(bounds, insets, region.topSafeOnly)))
+        g.safe = region.controls.intersection(inset(bounds, insets))
         var ci = insets; ci.left *= 0.5; ci.right *= 0.5
         g.corner = sep ? g.safe : inset(bounds, ci)
         g.portrait = sep && bounds.height > bounds.width
@@ -171,16 +143,16 @@ struct PadGeo: Equatable {
 
     var shapes: [Shape] {
         var out: [Shape] = []
-        for i in 0..<4 { out.append(Shape(c: faceKey[i], r: faceR, within: customBounds ?? corner, id: Self.shapeFace + i)) }
-        out.append(Shape(c: stick, r: stickR, within: customBounds ?? corner, id: Self.shapeStick))
-        if full { out.append(Shape(c: dpad, r: hypot(dpadR, armW), within: customBounds ?? corner, id: Self.shapeDpad)) }
+        for i in 0..<4 { out.append(Shape(c: faceKey[i], r: faceR, within: corner, id: Self.shapeFace + i)) }
+        out.append(Shape(c: stick, r: stickR, within: corner, id: Self.shapeStick))
+        if full { out.append(Shape(c: dpad, r: hypot(dpadR, armW), within: corner, id: Self.shapeDpad)) }
         for i in 0..<4 {
-            out.append(Shape(c: drop[i], r: dropR[i], within: customBounds ?? safe, id: Self.shapeDrop + i))
-            out.append(Shape(c: dropTip(i), r: 0, within: customBounds ?? safe, id: Self.shapeTip + i))
+            out.append(Shape(c: drop[i], r: dropR[i], within: safe, id: Self.shapeDrop + i))
+            out.append(Shape(c: dropTip(i), r: 0, within: safe, id: Self.shapeTip + i))
         }
-        if full { for i in 0..<2 { out.append(Shape(c: click[i], r: clickR, within: customBounds ?? safe, id: Self.shapeClick + i)) } }
-        for i in 0..<2 { out.append(Shape(rect: pill[i], isRect: true, within: customBounds ?? safe, id: Self.shapePill + i)) }
-        out.append(Shape(c: swap, r: swapR, within: customBounds ?? safe, id: Self.shapeSwap))
+        if full { for i in 0..<2 { out.append(Shape(c: click[i], r: clickR, within: safe, id: Self.shapeClick + i)) } }
+        for i in 0..<2 { out.append(Shape(rect: pill[i], isRect: true, within: safe, id: Self.shapePill + i)) }
+        out.append(Shape(c: swap, r: swapR, within: safe, id: Self.shapeSwap))
         return out
     }
     static func inside(_ s: Shape) -> Bool {
@@ -214,7 +186,7 @@ struct PadGeo: Equatable {
     static func baseUnit(_ screen: PadScreen, _ region: Region) -> CGFloat {
         let bounds = CGRect(origin: .zero, size: screen.size)
         if !region.separated { return min(bounds.height / 430.0, 1.3) }
-        let s = region.controls.intersection(inset(bounds, gameSafeInsets(bounds, screen.insets, region.topSafeOnly)))
+        let s = region.controls.intersection(inset(bounds, screen.insets))
         return min(min(s.height / 430.0, s.width / 700.0), 1.3)
     }
     /// DM_TOUCH_SIZE's scale: small 0.8, medium 1, large 1.2.
@@ -346,9 +318,6 @@ struct PadGeo: Equatable {
     /// What the engine draws for this layout: `dm_pad_geo` with the player's options.
     static func make(_ screen: PadScreen, full: Bool, size: String = "medium", stick: String = "corner", layout: TouchLayout = TouchLayout()) -> PadGeo {
         var g = placed(screen, full: full, size: size, stick: stick)
-        if screen.customControlsFullBounds && screen.size.width > screen.size.height && !g.region.separated {
-            g.customBounds = CGRect(origin: .zero, size: screen.size)
-        }
         let kind = TouchLayout.Kind.of(full: full, split: g.region.separated)
         if !layout.isEmpty(kind) { g.arrange(layout.moved(kind)) }
         return g

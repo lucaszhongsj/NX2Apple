@@ -77,13 +77,8 @@ struct TouchEditorPresentation: UIViewControllerRepresentable {
             owner.dismiss(animated: true) { [weak self] in self?.onDismiss?() }
         }
 
-        override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-            traitCollection.userInterfaceIdiom == .phone ? .landscape : .all
-        }
+        override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscape }
         override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
-            guard traitCollection.userInterfaceIdiom == .phone else {
-                return presentingViewController?.view.window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .portrait
-            }
             let current = presentingViewController?.view.window?.windowScene?.effectiveGeometry.interfaceOrientation
             return current == .landscapeLeft ? .landscapeLeft : .landscapeRight
         }

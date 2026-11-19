@@ -1,5 +1,5 @@
 #!/bin/bash
-# Route C shell (notes/launcher-c-plan.md M2/M3): one iPhone and iPad app for every game the player added. It embeds each game's
+# Route C shell (notes/launcher-c-plan.md M2/M3): one iPhone app for every game the player added. It embeds each game's
 # self-contained framework (build_ipa.sh DM_FRAMEWORK_ONLY=<folder>: the game's modules, host, tables, profile, settings list, shader
 # libraries, pipeline archive and icon). The game data stays out: the app takes it from Documents/games/<title ID>/ or a picked folder.
 # Usage: frontend-ios/Shell/build_shell.sh --prepare-xcode | --build
@@ -131,7 +131,7 @@ if [ "$MODE" = --prepare-xcode ]; then
   exit 0
 fi
 
-t "xcodebuild (Release, unsigned, iPhone + iPad)"
+t "xcodebuild (Release, unsigned, iPhone)"
 xcodebuild -project DmShell.xcodeproj -scheme DmShell -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$DD" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build > "$S/build.log" 2>&1 \
   || { grep -E 'error:' "$S/build.log" | head -20; die "xcodebuild, log $S/build.log"; }

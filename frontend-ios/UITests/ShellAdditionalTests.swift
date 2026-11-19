@@ -8,26 +8,6 @@ import XCTest
         attachment.lifetime = .keepAlways
         add(attachment)
     }
-    func testStageManagerResize() throws {
-        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "Stage Manager needs an iPad simulator")
-        XCUIDevice.shared.orientation = .portrait
-        app.launchArguments = ["--screen", "library"]
-        app.launch()
-        XCTAssertTrue(app.buttons["tile.tide"].waitForExistence(timeout: 10))
-        app.buttons["tile.tide"].tap()
-        capture("stage-manager-wide-before")
-        let frame = app.windows.firstMatch.frame
-        let origin = app.coordinate(withNormalizedOffset: .zero)
-        let corner = origin.withOffset(CGVector(dx: frame.width - 16, dy: frame.height - 16))
-        corner.press(forDuration: 0.5, thenDragTo: origin.withOffset(CGVector(dx: frame.width * 0.6, dy: frame.height * 0.72)))
-        capture("stage-manager-compact")
-        let tree = XCTAttachment(string: app.debugDescription + "\nSPRINGBOARD\n" + XCUIApplication(bundleIdentifier: "com.apple.springboard").debugDescription)
-        tree.name = "stage-manager-hierarchy"
-        tree.lifetime = .keepAlways
-        add(tree)
-        XCTAssertTrue(app.staticTexts["Animal Crossing™: New Horizons"].firstMatch.exists)
-        XCTAssertTrue(app.buttons["settings.open"].waitForExistence(timeout: 5), "The actual window resize must enter compact layout")
-    }
 }
 
 @MainActor final class ShellInputAndResizeTests: XCTestCase {
@@ -134,36 +114,6 @@ import XCTest
         XCUIDevice.shared.orientation = .portrait
     }
 
-    /// The foldable stand-in: the same running shell goes from the folded size to the unfolded one and back.
-    /// Selection, an edited toggle, the open settings and their scroll position must survive both changes.
-    func testFoldKeepsSelectionSettingsAndScroll() throws {
-        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "The fold stand-in needs an iPad canvas")
-        XCUIDevice.shared.orientation = .portrait
-        app.launchArguments = ["--screen", "library", "--fold-test"]
-        app.launch()
-        XCTAssertTrue(app.buttons["tile.tide"].waitForExistence(timeout: 10))
-        app.buttons["tile.tide"].tap()
-        app.buttons["settings.open"].tap()
-        let toggle = app.switches["setting.DM_SHOW_FPS"]
-        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
-        toggle.tap()
-        app.scrollViews.element(boundBy: app.scrollViews.count - 1).swipeUp()
-        capture("folded-settings-scrolled")
-        app.buttons["qa.fold"].tap()
-        // Unfolded: the settings stay open, now as a panel over the library.
-        XCTAssertEqual(app.staticTexts["detail.title"].label, "Animal Crossing™: New Horizons")
-        XCTAssertTrue(toggle.exists)
-        XCTAssertTrue(app.buttons["library.back"].exists)
-        capture("unfolded-settings-scrolled")
-        app.buttons["qa.fold"].tap()
-        XCTAssertTrue(app.buttons["library.back"].waitForExistence(timeout: 5))
-        capture("refolded-settings-scrolled")
-        app.scrollViews.element(boundBy: app.scrollViews.count - 1).swipeDown()
-        XCTAssertEqual(toggle.value as? String, "1")
-        app.buttons["library.back"].tap()
-        XCTAssertEqual(app.staticTexts["hero.title"].label, "Animal Crossing™: New Horizons")
-    }
-
     /// The middle of the centred card, measured from the title under it. The tilted cards' accessibility frames are
     /// skewed by their 3D transform, so a tap on the element itself can land on a neighbour.
     private func centreCard() -> XCUICoordinate {
@@ -194,11 +144,6 @@ import XCTest
         XCUIDevice.shared.orientation = .portrait
     }
     func testCoverFlowTouchSwipeSelects() { swipeCoverFlow(["--screen", "library"]) }
-    func testCoverFlowTouchSwipeSelectsUnfolded() throws {
-        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "The fold stand-in needs an iPad canvas")
-        swipeCoverFlow(["--screen", "library", "--fold-test", "--unfolded"])
-    }
-
     /// A broken game says what is wrong and explains the fix, the log stays one step away for a bug report.
     func testBrokenGameExplainsTheFix() {
         XCUIDevice.shared.orientation = .portrait

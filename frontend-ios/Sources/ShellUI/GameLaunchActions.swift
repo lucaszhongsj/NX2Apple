@@ -9,7 +9,6 @@ struct GameLaunchActions: View {
     var expands = false
     var alignment: Alignment = .leading
     var transitionDuration: Double = 0.3
-    @State private var divisionInsets = EdgeInsets()
     /// Supplied when the parent coordinates actions across its adaptive layouts.
     var glassNamespace: Namespace.ID? = nil
     @Namespace private var localGlassNamespace
@@ -25,14 +24,7 @@ struct GameLaunchActions: View {
         }
         .animation(reduceMotion ? nil : .smooth(duration: transitionDuration), value: game.state.actionTitle)
         .font(.headline)
-        .padding(divisionInsets)
         .frame(maxWidth: .infinity, alignment: alignment)
-        .onGeometryChange(for: EdgeInsets.self) { geometry in
-            if #available(iOS 27.1, macOS 27.1, *) {
-                return Self.insets(size: geometry.size, division: geometry.reservedRegions(kind: .division).first?.frame)
-            }
-            return EdgeInsets()
-        } action: { divisionInsets = $0 }
     }
     private func buttons(in namespace: Namespace.ID) -> some View {
         let joining = game.state.isJoining
@@ -69,12 +61,5 @@ struct GameLaunchActions: View {
                 .shellTarget(focusPrefix + "settings", radius: ShellFocusTarget.capsule, action: settings)
             }
         }
-    }
-
-    // Keep the related actions together when a system division crosses their content column.
-    nonisolated static func insets(size: CGSize, division: CGRect?) -> EdgeInsets {
-        guard let division, division.intersects(CGRect(origin: .zero, size: size)), division.height > division.width else { return EdgeInsets() }
-        let leading = max(0, division.minX), trailing = max(0, size.width - division.maxX)
-        return leading >= trailing ? EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: size.width - leading) : EdgeInsets(top: 0, leading: size.width - trailing, bottom: 0, trailing: 0)
     }
 }

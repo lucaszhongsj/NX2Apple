@@ -25,7 +25,6 @@ struct DemoScreen: View {
     @State private var games = SampleData.games
     @State private var notice: String?
     @State private var input = ShellInputLog()
-    @State private var unfolded = ProcessInfo.processInfo.arguments.contains("--unfolded")
     /// Real controllers, through the reusable adapter in ShellControllers.
     @State private var gamepads = GamepadAdapter()
     @State private var connected: [ConnectedController] = []
@@ -63,9 +62,7 @@ struct DemoScreen: View {
     }
 
     var body: some View {
-        Group {
-            if args.contains("--fold-test") { foldHarness } else { shell }
-        }
+        shell
         .background(ShellPalette.background)
         // QA only: on-screen stand-ins for controller buttons, above everything so the art never takes their taps.
         .overlay(alignment: .bottom) {
@@ -105,30 +102,6 @@ struct DemoScreen: View {
                         ? PadSnapshot(name: "Demo", pressed: [.a, .leftBumper, .up], leftStick: CGPoint(x: 0.6, y: 0.5), rightTrigger: 0.7) : nil),
                     initialPadMapping: scenario == "controllers-mapping" ? ControllersView.mappingID : nil,
                     initialButtonTestOpen: scenario == "controllers-test")
-    }
-
-    /// A stand-in for the foldable while no Simulator runtime for it is installed: the same running shell in a frame
-    /// that switches between a short 1.4:1 phone screen (folded) and a larger, nearly square one (unfolded).
-    /// The sizes are only this harness's. ShellUI decides from whatever size it gets.
-    private var foldHarness: some View {
-        GeometryReader { geometry in
-            let landscape = geometry.size.width > geometry.size.height
-            let folded = landscape ? CGSize(width: 525, height: 375) : CGSize(width: 375, height: 525)
-            let open = landscape ? CGSize(width: 890, height: 626) : CGSize(width: 626, height: 890)
-            let size = unfolded ? open : folded
-            VStack(spacing: 14) {
-                Button(unfolded ? "Fold" : "Unfold") {
-                    withAnimation(.smooth(duration: 0.45)) { unfolded.toggle() }
-                }
-                .accessibilityIdentifier("qa.fold").frame(minHeight: 44)
-                shell
-                    .frame(width: size.width, height: size.height)
-                    .clipShape(RoundedRectangle(cornerRadius: 28))
-                    .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(.white.opacity(0.25)))
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .background(Color.black.ignoresSafeArea())
     }
 
     private func qaAction(_ name: String) -> ShellInput.Action {
@@ -218,6 +191,4 @@ struct DemoScreen: View {
 #Preview("Controllers") { ControllersView(controllers: SampleData.controllers).background(ShellPalette.background) }
 #Preview("No controllers") { ControllersView(controllers: []).background(ShellPalette.background) }
 #Preview("Two panes", traits: .fixedLayout(width: 834, height: 1194)) { DemoScreen() }
-#Preview("Folded", traits: .fixedLayout(width: 375, height: 525)) { DemoScreen() }
-#Preview("Unfolded", traits: .fixedLayout(width: 626, height: 890)) { DemoScreen() }
 #Preview("Largest text") { DemoScreen().environment(\.dynamicTypeSize, .accessibility5) }

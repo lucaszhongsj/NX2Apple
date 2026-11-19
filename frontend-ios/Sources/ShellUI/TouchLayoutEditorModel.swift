@@ -11,7 +11,7 @@ import UIKit
     typealias Control = TouchLayout.Control
 
     @ObservationIgnored let store: ShellSettingsStore
-    /// The device held sideways, and upright where the controls can sit below the picture (an iPad, iPhone Duo), else nil.
+    /// The device held sideways, and upright where the controls can sit below the picture, else nil.
     let sideways: PadScreen
     let upright: PadScreen?
     private let initialLayout: TouchLayout
@@ -198,7 +198,7 @@ extension TouchLayoutEditorModel {
     /// Opens the saved global layout; live geometry decides the overlay/split variant.
     static func forDevice(window: CGSize, insets: EdgeInsets, store: ShellSettingsStore = .current) -> TouchLayoutEditorModel {
         #if os(iOS)
-        let screens = TouchLayoutScreens.device(window: window, insets: insets, isPad: UIDevice.current.userInterfaceIdiom == .pad)
+        let screens = TouchLayoutScreens.device(window: window, insets: insets)
         #else
         let screens = (sideways: PadScreen.proMax, upright: PadScreen?.none)
         #endif
@@ -216,28 +216,18 @@ extension TouchLayoutEditorModel {
     }
 }
 
-/// The game's screen on this device, for the editor: the shell's window (on a phone the screen) held sideways, and upright where a
-/// game puts the controls below the picture (an iPad, and a foldable's inner display, which is about 1.4 to 1 where a phone is above 2
-/// to 1). The side insets of a phone held sideways are its top inset upright (the Dynamic Island or the notch), and the home indicator
-/// takes 21 points. An approximation for the preview: the engine places the controls on the real screen.
+/// The game's screen on this device, for the editor: the shell's window (on a phone the screen) held sideways. The side insets of a
+/// phone held sideways are its top inset upright (the Dynamic Island or the notch), and the home indicator takes 21 points. An
+/// approximation for the preview: the engine places the controls on the real screen.
 enum TouchLayoutScreens {
-    static func device(window: CGSize, insets: EdgeInsets, isPad: Bool) -> (sideways: PadScreen, upright: PadScreen?) {
+    static func device(window: CGSize, insets: EdgeInsets) -> (sideways: PadScreen, upright: PadScreen?) {
         let long = max(window.width, window.height), short = min(window.width, window.height)
         guard long > 0, short > 0 else { return (.proMax, nil) }
-        if isPad {
-            let i = PadScreen.Insets(top: 24, bottom: 20)
-            return (PadScreen(size: CGSize(width: long, height: short), insets: i), PadScreen(size: CGSize(width: short, height: long), insets: i))
-        }
         let upright = window.height > window.width
         let island = upright ? insets.top : max(insets.leading, insets.trailing)
         let home: CGFloat = insets.bottom > 0 ? 21 : 0
         let side = island > 30 ? island : 0
         let sideways = PadScreen(size: CGSize(width: long, height: short), insets: PadScreen.Insets(left: side, bottom: home, right: side))
-        guard long / short < 1.7 else { return (sideways, nil) }
-        // A foldable's inner display upright: the fold across the middle, the picture above it keeps only the top inset.
-        let fold = CGRect(x: 0, y: long / 2 - 20, width: short, height: 40)
-        let top = upright ? insets.top : max(insets.leading, insets.trailing)
-        return (sideways, PadScreen(size: CGSize(width: short, height: long), insets: PadScreen.Insets(top: top, bottom: insets.bottom > 0 ? 34 : 0),
-                                    division: fold, topSafeOnly: true))
+        return (sideways, nil)
     }
 }

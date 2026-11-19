@@ -6,8 +6,8 @@ import Foundation
 /// `1;2d/face:0,-2/stick:1,-1;3d/a:-1,0`. A step is a quarter of a face key's width at the player's size, y grows downward.
 /// The engine stores nothing and places a control only where it fits, so a value can never break the layout.
 public struct TouchLayout: Equatable, Sendable {
-    /// The layouts with an arrangement of their own: 2D and 3D over the picture (a phone, an iPad held sideways), and both again
-    /// below the picture (an iPad held upright, iPhone Duo upright or half open). The raw values are the engine's names.
+    /// The layouts with an arrangement of their own: 2D and 3D over the picture, and both again below the picture.
+    /// The raw values are the engine's names.
     public enum Kind: String, CaseIterable, Sendable {
         case twoD = "2d", threeD = "3d", twoDSplit = "2s", threeDSplit = "3s"
         public var full: Bool { self == .threeD || self == .threeDSplit }

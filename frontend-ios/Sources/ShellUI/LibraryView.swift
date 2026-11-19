@@ -18,11 +18,6 @@ enum ShellLayout: Equatable {
 
     var isCoverFlow: Bool { if case .coverFlow = self { true } else { false } }
 
-    static func divisionAxis(_ division: CGRect?, in size: CGSize) -> Axis? {
-        guard let division, division.intersects(CGRect(origin: .zero, size: size)), !division.isEmpty else { return nil }
-        return division.width > division.height ? .horizontal : .vertical
-    }
-
     static func collapseProgress(expanded: CGFloat, minimum: CGFloat, travel: CGFloat) -> CGFloat {
         let distance = expanded - minimum
         return distance > 0 ? min(1, max(0, travel / distance)) : 1
@@ -77,8 +72,6 @@ public struct LibraryView: View {
     @State var settingsHeroHeight: CGFloat = 0
     @State var libraryPosition = ScrollPosition()
     @State var layout: ShellLayout = .column
-    @State var divisionAxis: Axis?
-    var horizontalDivision: Bool { divisionAxis == .horizontal }
     @State var pendingMenuAction: (() -> Void)?
     @State var retention = PanelRetention()   // a closed panel stays drawn while the sheet slides out (#664)
     @State var returnFocus: String?
@@ -182,14 +175,11 @@ public struct LibraryView: View {
                     }
                     #endif
                     .presentationSizing(LauncherMenuSizing(mapping: padMapping != nil))
-                    // shortcut: cap tabletop sheets until the runtime keeps large detents clear of the fold.
-                    .presentationDetents(horizontalDivision ? [.medium] : [.large])
-                    .presentationCompactAdaptation(divisionAxis == nil ? .automatic : .sheet)
+                    .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
                     .presentationBackground(ShellPalette.background)
                     .presentationContentInteraction(touchLayout != nil ? .scrolls : .automatic)
                     .interactiveDismissDisabled(touchLayout != nil)
-                    .modifier(MenuPlacement(divided: divisionAxis == .vertical, secondary: controllersOpen || shellSettingsOpen))
                     .modifier(ShellKeyboardNavigation(active: touchLayout == nil && padMapping?.row == nil) { handle($0, from: .keyboard) })
             }
 
@@ -197,12 +187,6 @@ public struct LibraryView: View {
             .onPreferenceChange(FocusTargets.self) { all in
                 targets.libraryValues = all.filter { $0.frame.width > 1 }
             }
-            .onGeometryChange(for: Axis?.self) { geometry in
-                if #available(iOS 27.1, macOS 27.1, *) {
-                    return ShellLayout.divisionAxis(geometry.reservedRegions(kind: .division).first?.frame, in: geometry.size)
-                }
-                return nil
-            } action: { divisionAxis = $0 }
             .onAppear { self.layout = layout }
             .onChange(of: layout) { _, new in self.layout = new }
         }
@@ -413,22 +397,16 @@ public struct LibraryView: View {
 
         }
         .navigationTitle(menuTitle)
-        .navigationSubtitle(tabletopSettings ? ShellStrings.text("Game settings").uppercased() : "")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-    }
-
-    var tabletopSettings: Bool {
-        horizontalDivision && settingsOpen && !controllersOpen && !shellSettingsOpen && choice == nil
-            && padMapping == nil && !buttonTestOpen && helpGameID == nil && restoreBackupGameID == nil && deleteGameID == nil
     }
 
     var menuTitle: String {
         guard choice == nil, padMapping == nil, !buttonTestOpen, helpGameID == nil, restoreBackupGameID == nil, deleteGameID == nil else { return "" }
         if controllersOpen { return ShellStrings.text("Controllers") }
         if shellSettingsOpen { return ShellStrings.text("Settings") }
-        return settingsOpen && (horizontalDivision || !settingsHeroVisible) ? selected?.game.title ?? "" : ""
+        return settingsOpen && !settingsHeroVisible ? selected?.game.title ?? "" : ""
     }
 
     @ViewBuilder func library(_ selected: GameDetail, layout: ShellLayout, size: CGSize, insets: EdgeInsets) -> some View {
@@ -453,15 +431,13 @@ public struct LibraryView: View {
         return ZStack(alignment: .top) {
             ScrollViewReader { proxy in
                 Form {
-                    if !horizontalDivision {
-                        Section {
-                            PaneBanner(game: selected.game, width: width)
-                                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { settingsHeroHeight = $0 }
-                                .listRowBackground(Color.clear)
-                                .listRowSeparator(.hidden)
-                        }
-                        .id("set.top")
+                    Section {
+                        PaneBanner(game: selected.game, width: width)
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { settingsHeroHeight = $0 }
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
                     }
+                    .id("set.top")
                     GameDetailView(detail: selected, actions: menuActions,
                                    showsPrimaryAction: false,
                                    showsHeader: false, nativeSections: true)
@@ -496,7 +472,7 @@ public struct LibraryView: View {
         let action: () -> Void
     }
 
-    // The navigation container owns these bars so UIKit can share the Duo rail with system UI.
+    // The navigation container owns these bars so UIKit keeps the system UI in step.
     @ToolbarContentBuilder var launcherToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .cancellationAction) {
             ForEach(toolbarActions.filter { $0.placement == .close }) { item in
@@ -710,21 +686,6 @@ struct CoverThumbnail: View {
         .accessibilityHidden(true)
     }
 }
-/// Request a native side only when the system reports a vertical division; flat iPhone/iPad sheets stay adaptive.
-private struct MenuPlacement: ViewModifier {
-    var divided: Bool
-    var secondary: Bool
-    @ViewBuilder func body(content: Content) -> some View {
-        #if os(iOS)
-        if #available(iOS 27.0, *), divided {
-            content.presentationPlacement(secondary ? .trailing : .leading)
-        } else { content }
-        #else
-        content
-        #endif
-    }
-}
-
 private struct LauncherMenuSizing: PresentationSizing {
     var mapping: Bool
     func proposedSize(for root: PresentationSizingRoot, context: PresentationSizingContext) -> ProposedViewSize {

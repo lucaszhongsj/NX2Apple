@@ -4,6 +4,8 @@ import Testing
 
 /// The touch controls settings (#347): the size row and the preview's geometry.
 @Suite struct TouchControlsTests {
+    /// A phone standing up: the controls sit below the picture.
+    private let uprightPhone = PadScreen(size: CGSize(width: 440, height: 956), insets: PadScreen.Insets(top: 62, bottom: 34))
     private func store() -> ShellSettingsStore { ShellSettingsStore(defaults: UserDefaults(suiteName: "t-touch-\(UUID().uuidString)")!) }
 
     @MainActor @Test func savedModeReopensAndUsesTheExistingEngineSetting() {
@@ -16,7 +18,7 @@ import Testing
         #expect(store.touchMode == "2d" && store.gameDefaults["DM_PROF_PAD_LAYOUT"] == "0")
         let reopened = TouchLayoutEditorModel(store: store)
         #expect(reopened.kind == .twoD && !reopened.hasChanges)
-        reopened.updateScreen(.duoUpright)
+        reopened.updateScreen(uprightPhone)
         #expect(reopened.kind == .twoDSplit && !reopened.hasChanges)
         reopened.setKind(.threeDSplit)
         reopened.commit()
@@ -29,7 +31,7 @@ import Testing
     @MainActor @Test(arguments: ["noop", "size", "stick", "arrangement", "pose"])
     func savingOtherEditorStateKeepsAnUnsetModeUnset(edit: String) {
         let store = store()
-        let model = TouchLayoutEditorModel(store: store, upright: edit == "pose" ? .duoUpright : nil)
+        let model = TouchLayoutEditorModel(store: store, upright: edit == "pose" ? uprightPhone : nil)
         switch edit {
         case "size": model.setSize("large")
         case "stick": model.setStick("higher")
@@ -85,7 +87,7 @@ import Testing
         store.storeTouchMode(mode)
         let model = TouchLayoutEditorModel(store: store)
         model.setSize("large")
-        model.updateScreen(.duoUpright)
+        model.updateScreen(uprightPhone)
         model.commit()
         let reopened = ShellSettingsStore(defaults: store.defaults)
         #expect(reopened.touchSize == "large")
@@ -236,9 +238,9 @@ import Testing
         model.askReset()
         #expect(model.confirmingReset)
 
-        model.updateScreen(.duoUpright)
-        #expect(model.kind == .threeDSplit, "the inner portrait surface separates the controls")
-        #expect(model.editing.screen == .duoUpright)
+        model.updateScreen(uprightPhone)
+        #expect(model.kind == .threeDSplit, "the portrait surface separates the controls")
+        #expect(model.editing.screen == uprightPhone)
         #expect(model.editing.layout == draft, "pose adaptation must not prune or replace any saved/draft offsets")
         #expect(model.selected == .stick && !model.held)
         #expect(!model.invalidPlacement && !model.rejected && !model.confirmingReset)
@@ -250,7 +252,7 @@ import Testing
         #expect(model.selected == .stick && !model.held)
 
         model.setKind(.twoD)
-        model.updateScreen(.duoUpright)
+        model.updateScreen(uprightPhone)
         #expect(model.kind == .twoDSplit, "the same pose adaptation retains the selected 2D layout")
         #expect(model.editing.layout == draft)
     }

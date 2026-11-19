@@ -79,7 +79,7 @@ targets:
       # No SYMROOT / OBJROOT of its own (project.yml has them): Swift packages need Xcode's own build locations. Products go to the
       # derived data xcodebuild is given (-derivedDataPath; build_shell.sh, the Mac launcher)
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-      TARGETED_DEVICE_FAMILY: "1,2"
+      TARGETED_DEVICE_FAMILY: "1"
       ENABLE_BITCODE: NO
       STRIP_BITCODE_FROM_COPIED_FILES: NO   # the embed phase would run bitcode_strip on every Mach-O file in a framework, the pipeline archive's GPU binaries (pso/*.mtl4a) too, and fail
       GCC_C_LANGUAGE_STANDARD: gnu11

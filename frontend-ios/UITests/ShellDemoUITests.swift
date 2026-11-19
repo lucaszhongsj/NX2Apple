@@ -241,19 +241,6 @@ import XCTest
         app.descendants(matching: .any).matching(identifier: "settings.scroll").firstMatch
     }
 
-    // Run on the closed Duo in landscape, with its native sheet side rail.
-    func testGameSettingsInsetsNativeRailOnce() {
-        launch("library")
-        XCTAssertTrue(app.scrollViews["library.coverflow"].waitForExistence(timeout: 5))
-        app.buttons["settings.open"].tap()
-        XCTAssertTrue(app.buttons["library.back"].waitForExistence(timeout: 5))
-        XCTAssertEqual(app.buttons["library.back"].label, "Close")
-        let play = app.buttons.matching(identifier: "state.action").allElementsBoundByIndex.first { $0.isHittable }
-        XCTAssertNotNil(play)
-        let scroll = app.scrollViews.element(boundBy: app.scrollViews.count - 1)
-        XCTAssertLessThan(play!.frame.minX - scroll.frame.minX, scroll.frame.width * 0.2, "The primary action must not repeat the native rail inset")
-    }
-
     func testNativeLauncherBarsFollowTheActiveScreen() {
         launch("library")
         XCTAssertEqual(app.buttons.matching(identifier: "shellSettings.open").count, 1)
@@ -498,43 +485,6 @@ import XCTest
         waitForExpectations(timeout: 5)
     }
 
-    // Run on iPad: changing orientation must reflow the live canvas, not scale an old snapshot.
-    func testTouchEditorFollowsPortraitAndLandscapeBounds() {
-        XCUIDevice.shared.orientation = .landscapeLeft
-        launch("shell-settings")
-        let arrange = app.buttons["shellSettings.arrange"]
-        reveal(arrange)
-        arrange.tap()
-        XCTAssertTrue(app.buttons["touchLayout.options"].waitForExistence(timeout: 5))
-        for pose in [UIDeviceOrientation.portrait, .landscapeLeft, .portrait] {
-            XCUIDevice.shared.orientation = pose
-            let matches = NSPredicate { _, _ in
-                let preview = self.app.otherElements["touchLayout.editor"].firstMatch.frame
-                let window = self.app.windows.firstMatch.frame
-                return abs(preview.width - window.width) < 2 && abs(preview.height - window.height) < 2
-                    && (pose == .portrait ? preview.height > preview.width : preview.width > preview.height)
-            }
-            expectation(for: matches, evaluatedWith: nil)
-            waitForExpectations(timeout: 5)
-            let stick = app.buttons["Left stick"].firstMatch
-            XCTAssertTrue(stick.exists)
-            XCTAssertGreaterThan(stick.frame.midY, app.windows.firstMatch.frame.midY)
-        }
-        let options = app.buttons["touchLayout.options"]
-        options.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
-        XCTAssertTrue(app.buttons["touchLayout.done"].waitForExistence(timeout: 5))
-        app.buttons["touchLayout.done"].tap()
-        XCTAssertTrue(app.buttons["shellSettings.close"].waitForExistence(timeout: 5))
-        XCTAssertFalse(options.exists)
-        reveal(arrange)
-        arrange.tap()
-        XCTAssertTrue(options.waitForExistence(timeout: 5))
-        options.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
-        app.buttons["touchLayout.back"].tap()
-        XCTAssertTrue(app.buttons["shellSettings.close"].waitForExistence(timeout: 5))
-        XCTAssertFalse(options.exists)
-    }
-
     func testSavedTouchModeReopensSelected() {
         launch("shell-settings")
         func openOptions() {
@@ -648,24 +598,6 @@ import XCTest
         app.buttons["touchLayout.options"].tap()
         XCTAssertTrue(app.buttons["touchLayout.done"].waitForExistence(timeout: 5))
         app.buttons["touchLayout.done"].tap()
-        XCTAssertTrue(app.buttons["shellSettings.close"].waitForExistence(timeout: 5))
-    }
-
-    // Run on a partially folded inner display, in landscape or tabletop.
-    func testFoldedArrangeKeepsInteractivePreviewInEditor() {
-        launch("shell-settings")
-        let arrange = app.buttons["shellSettings.arrange"]
-        reveal(arrange)
-        arrange.tap()
-        XCTAssertTrue(app.buttons["touchLayout.options"].waitForExistence(timeout: 5))
-        app.buttons["touchLayout.options"].tap()
-        XCTAssertTrue(app.buttons["touchLayout.back"].waitForExistence(timeout: 5))
-        let editor = app.otherElements["touchLayout.editor"]
-        XCTAssertTrue(editor.waitForExistence(timeout: 5))
-        XCTAssertTrue(editor.otherElements["touchLayout.preview"].exists,
-                      "The draggable preview must belong to the full-screen editor")
-        capture("arrange-folded-fullscreen-editor")
-        app.buttons["touchLayout.back"].tap()
         XCTAssertTrue(app.buttons["shellSettings.close"].waitForExistence(timeout: 5))
     }
 
@@ -826,7 +758,7 @@ import XCTest
         XCTAssertEqual(app.staticTexts["hero.title"].label, "Mario Kart™ 8 Deluxe")
     }
 
-    // Run with the simulator in landscape; Device Hub owns Duo orientation.
+    // Run with the simulator in landscape.
     func testCoverFlowSwipesAndCentersSelection() {
         XCUIDevice.shared.orientation = .landscapeLeft
         for count in [7, 3] {
@@ -873,7 +805,7 @@ import XCTest
         capture("native-centered-coverflow")
     }
 
-    // Run on expanded portrait or tabletop: selection scrolls the grid, not the pinned hero.
+    // Run on an expanded portrait layout: selection scrolls the grid, not the pinned hero.
     func testPortraitTileTapScrollsSelectionIntoView() {
         launch("library")
         let grid = app.scrollViews["library.grid"]
@@ -911,7 +843,7 @@ import XCTest
         capture("portrait-controller-selection-centered")
     }
 
-    // Run on a compact portrait simulator, including the closed Duo.
+    // Run on a compact portrait simulator.
     func testCompactPortraitPullDownKeepsNativeActionsAvailable() {
         XCUIDevice.shared.orientation = .portrait
         extraArguments = ["--samples"]
@@ -1059,137 +991,6 @@ import XCTest
         play.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         XCTAssertTrue(app.alerts["Demo action"].waitForExistence(timeout: 5))
         app.alerts.buttons["OK"].tap()
-    }
-
-    // Run in portrait with an active horizontal system division.
-    func testTabletopKeepsHeroAndBottomActionsWhileGridScrolls() {
-        launch("library")
-        let grid = app.scrollViews["library.grid"]
-        let hero = app.staticTexts["hero.title"]
-        XCTAssertTrue(hero.waitForExistence(timeout: 5))
-        let header = hero.frame
-        let heading = app.otherElements["library.heading"]
-        XCTAssertTrue(heading.exists)
-        let headingFrame = heading.frame
-        XCTAssertGreaterThan(headingFrame.minY, header.maxY)
-        XCTAssertLessThanOrEqual(headingFrame.maxY, grid.frame.minY + 1)
-        let play = app.buttons["state.action"]
-        let actionFrame = play.frame
-        XCTAssertGreaterThan(play.frame.width, grid.frame.width * 0.6)
-        let firstTileY = app.buttons["tile.paper"].frame.minY
-        grid.swipeUp()
-        XCTAssertLessThan(app.buttons["tile.paper"].frame.minY, firstTileY - 20)
-        XCTAssertEqual(hero.frame, header)
-        XCTAssertEqual(heading.frame, headingFrame)
-        XCTAssertEqual(play.frame, actionFrame)
-        XCTAssertEqual(app.buttons.matching(identifier: "state.action").count, 1)
-        let scrolled = XCTAttachment(screenshot: app.screenshot())
-        scrolled.name = "tabletop-scrolled-material-heading"
-        scrolled.lifetime = .keepAlways
-        add(scrolled)
-        app.buttons["settings.open"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        XCTAssertTrue(app.buttons["library.back"].waitForExistence(timeout: 5))
-        app.buttons["library.back"].tap()
-    }
-
-    // Run in tabletop: the visible primary-region hero provides the game's artwork/version context.
-    func testTabletopGameSettingsUsesNativeTitleWithoutDuplicateHero() {
-        launch("library")
-        app.buttons["settings.open"].tap()
-        XCTAssertTrue(app.buttons["library.back"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.navigationBars.staticTexts["Mario Kart™ 8 Deluxe"].exists)
-        XCTAssertTrue(app.navigationBars.staticTexts["GAME SETTINGS"].exists)
-        XCTAssertFalse(app.staticTexts["detail.title"].exists)
-        XCTAssertFalse(settingsScroll.staticTexts["Version 1.4.0"].exists)
-        XCTAssertTrue(app.segmentedControls["setting.DM_OPERATION_MODE"].firstMatch.isHittable)
-        XCTAssertTrue(app.buttons["state.action"].isHittable)
-        app.buttons["library.back"].tap()
-        XCTAssertTrue(app.buttons["settings.open"].waitForExistence(timeout: 5))
-    }
-
-    // Run with an active horizontal division in tabletop portrait.
-    func testTabletopMenusStayBelowHeroAndContentScrolls() {
-        launch("library")
-        let heroBottom = app.staticTexts["hero.title"].frame.maxY
-        for (open, close) in [("controllers.open", "controllers.close"), ("shellSettings.open", "shellSettings.close"), ("settings.open", "library.back")] {
-            app.buttons[open].tap()
-            XCTAssertTrue(app.buttons[close].waitForExistence(timeout: 5))
-            XCTAssertGreaterThan(app.navigationBars.containing(.button, identifier: close).firstMatch.frame.minY, heroBottom)
-            let scroll = app.scrollViews.element(boundBy: app.scrollViews.count - 1)
-            scroll.swipeUp()
-            XCTAssertTrue(app.buttons[close].isHittable)
-            XCTAssertGreaterThan(app.navigationBars.containing(.button, identifier: close).firstMatch.frame.minY, heroBottom)
-            app.buttons[close].tap()
-        }
-        XCTAssertTrue(app.buttons["settings.open"].isHittable)
-    }
-
-    // Run with an active vertical system division.
-    func testFoldedCoverFlowIsOneSequenceWithoutRepeatedSelection() {
-        launch("library")
-        let flow = app.scrollViews["library.coverflow"]
-        XCTAssertTrue(flow.waitForExistence(timeout: 5))
-        XCTAssertFalse(app.scrollViews["library.selected"].exists)
-        XCTAssertFalse(app.buttons["selected.artwork"].exists)
-        let orbit = app.buttons["tile.orbit"]
-        let tide = app.buttons["tile.tide"]
-        let dragDistance = orbit.frame.width * 0.7
-        XCTAssertEqual(app.buttons.matching(identifier: "tile.orbit").count, 1)
-        XCTAssertLessThan(orbit.frame.midX, flow.frame.midX)
-        XCTAssertGreaterThan(tide.frame.midX, flow.frame.midX)
-        XCTAssertGreaterThan(tide.frame.minX, orbit.frame.midX)
-        XCTAssertLessThanOrEqual(tide.frame.minX, orbit.frame.maxX + 12)
-        XCTAssertLessThan(app.buttons["state.action"].frame.maxX, flow.frame.midX)
-        XCTAssertEqual(app.staticTexts["hero.title"].frame.minX, app.buttons["state.action"].frame.minX, accuracy: 4)
-        XCTAssertTrue(app.buttons["controllers.open"].isHittable)
-        XCTAssertTrue(app.buttons["shellSettings.open"].isHittable)
-        XCTAssertTrue(app.staticTexts["library.position"].exists)
-        flow.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5))
-            .press(forDuration: 0.05, thenDragTo: flow.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).withOffset(CGVector(dx: -dragDistance, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
-        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: tide)
-        waitForExpectations(timeout: 5)
-        XCTAssertEqual(app.staticTexts["hero.title"].label, "Animal Crossing™: New Horizons")
-        XCTAssertEqual(app.buttons.matching(identifier: "tile.tide").count, 1)
-        XCTAssertFalse(app.alerts["Demo action"].exists)
-        XCTAssertEqual(app.buttons.matching(identifier: "state.action").count, 1)
-        flow.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5))
-            .press(forDuration: 0.05, thenDragTo: flow.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5)).withOffset(CGVector(dx: dragDistance, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
-        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: orbit)
-        waitForExpectations(timeout: 5)
-        app.buttons["settings.open"].tap()
-        XCTAssertTrue(app.buttons["library.back"].waitForExistence(timeout: 5))
-        app.buttons["library.back"].tap()
-        capture("folded-coverflow-one-sequence")
-        extraArguments = ["--select", "amber"]
-        launch("library")
-        let last = app.buttons["tile.amber"]
-        XCTAssertTrue(last.isSelected)
-        XCTAssertLessThan(last.frame.midX, flow.frame.midX)
-        XCTAssertEqual(app.buttons.matching(identifier: "tile.amber").count, 1)
-        let distance = last.frame.width * 0.7
-        flow.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5))
-            .press(forDuration: 0.05, thenDragTo: flow.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5)).withOffset(CGVector(dx: distance, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
-        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: app.buttons["tile.drift"])
-        waitForExpectations(timeout: 5)
-    }
-
-    // Run on the closed Duo portrait display with its native trailing rail.
-    func testOuterPortraitActionsUseBottomWidthClearOfRail() {
-        launch("library")
-        let play = app.buttons["state.action"]
-        let settings = app.buttons["settings.open"]
-        let rail = app.buttons["shellSettings.open"]
-        let controllers = app.buttons["controllers.open"]
-        XCTAssertTrue(controllers.isHittable)
-        XCTAssertTrue(rail.isHittable)
-        XCTAssertEqual(controllers.frame.midY, rail.frame.midY, accuracy: 4)
-        XCTAssertTrue(play.isHittable)
-        XCTAssertTrue(settings.isHittable)
-        XCTAssertGreaterThan(settings.frame.maxX, rail.frame.minX)
-        XCTAssertGreaterThan(settings.frame.minY, rail.frame.maxY)
-        XCTAssertEqual(play.frame.midY, settings.frame.midY, accuracy: 2)
-        settings.tap()
-        XCTAssertTrue(app.buttons["library.back"].waitForExistence(timeout: 5))
     }
 
     func testGameSettingsTitleFollowsHeroVisibility() {
